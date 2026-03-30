@@ -16,7 +16,6 @@ class MosItrController extends Controller
     {
         return response()->json([
             'transferTypes' => $this->getTransferTypes(),
-            'inventoryList' => $this->listInventory($request),
             'signatories' => $this->getsignatories(),
             'employeesList' => $this->employeesList(),
         ]);
