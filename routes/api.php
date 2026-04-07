@@ -14,9 +14,12 @@ Route::get('/user', function (Request $request) {
 Route::group(['prefix' => 'itr'], function () {
     Route::get('/itrindex', [MosItrController::class, 'index']);
     Route::get('/listinventory', [MosItrController::class, 'listInventory']);
+    Route::get('/listgeninventory', [MosItrController::class, 'listGenInventory']);
     Route::get('/listfacilityagency', [MosItrController::class, 'listFacilityAgency']);
     Route::post('/save', [MosItrController::class, 'save']);
     Route::get('/list', [MosItrController::class, 'listItr']);
+    Route::get('/{id}/pdf', [MosItrController::class, 'generatePdf']);
+    Route::get('/export', [MosItrController::class, 'export']);
     Route::get('/{id}', [MosItrController::class, 'showItr']);
     Route::delete('delete/{id}', [MosItrController::class, 'destroy']);
     // Route::get('/getsignatories', [MosItrController::class, 'getSignatories']);

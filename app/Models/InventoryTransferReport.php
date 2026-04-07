@@ -11,22 +11,7 @@ class InventoryTransferReport extends Model
 
     protected $table = 'inventory_transfer_reports';
 
-    protected $fillable = [
-        'itr_no',
-        'entity_name',
-        'fund_cluster',
-        'from_entity',
-        'to_entity',
-        'date_issued',
-        'transfer_type_id',
-        'others_specify',
-        'reason',
-        'approved_by',
-        'issued_by',
-        'received_by',
-        'status',
-        'total_amount',
-    ];
+    protected $fillable = ['itr_no', 'entity_name', 'fund_cluster', 'from_entity', 'to_entity', 'date_issued', 'transfer_type_id', 'others_specify', 'reason', 'approved_by', 'issued_by', 'received_by', 'status', 'total_amount'];
 
     public function items()
     {
@@ -43,8 +28,28 @@ class InventoryTransferReport extends Model
         return $this->belongsTo(FacilityAgencyList::class, 'to_entity', 'faid');
     }
 
+    public function fromEntity()
+    {
+        return $this->belongsTo(FacilityAgencyList::class, 'from_entity', 'faid');
+    }
+
     public function employeeInfo()
     {
-       return $this->belongsto(EmployeeList::class, 'received_by', 'empid');
+        return $this->belongsTo(EmployeeList::class, 'received_by', 'empid');
+    }
+
+    public function approvedBySignatory()
+    {
+        return $this->belongsTo(Signatory::class, 'approved_by', 'sign_id');
+    }
+
+    public function issuedBySignatory()
+    {
+        return $this->belongsTo(Signatory::class, 'issued_by', 'sign_id');
+    }
+
+    public function receivedByEmployee()
+    {
+        return $this->belongsTo(EmployeeList::class, 'received_by', 'empid');
     }
 }

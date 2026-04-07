@@ -9,9 +9,15 @@ use App\Models\EmployeeList;
 use App\Models\InventoryTransferReport;
 use App\Models\InventoryTransferReportItem;
 use App\Models\FacilityAgencyList;
+use App\Models\CommodityMasterList;
+use App\Models\TransGenInventory;
+use App\Models\CommodityCategory;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Barryvdh\DomPDF\Facade\Pdf;
+use App\Exports\ItrExcelExport;
+use Maatwebsite\Excel\Facades\Excel;
 
 class MosItrController extends Controller
 {
@@ -39,10 +45,11 @@ class MosItrController extends Controller
 
     public function employeesList()
     {
-        // Get only id and fullname
-        $employees = EmployeeList::select('empid', 'fullname')->get();
+        $employees = EmployeeList::select('empid', 'fullname')
+            ->where('void', '=', 0)
+            ->orderBy('firstname', 'asc')
+            ->get();
 
-        // ✅ Convert to array and return directly
         return $employees->toArray();
     }
 
@@ -76,6 +83,34 @@ class MosItrController extends Controller
         ",
             $bindings,
         );
+    }
+
+    public function listGenInventory(Request $request)
+    {
+        $search = $request->input('search');
+        $category = $request->input('category'); // from VSelect
+
+        $query = CommodityMasterList::with(['inventory', 'category'])
+            ->orderBy('comid', 'desc');
+
+        // Text search (only on com_desc and inventory.poptrno)
+        if (!empty($search)) {
+            $query->where(function ($q) use ($search) {
+                $q->where('com_desc', 'LIKE', "%{$search}%")
+                ->orWhereHas('inventory', function ($q2) use ($search) {
+                    $q2->where('poptrno', 'LIKE', "%{$search}%");
+                });
+            });
+        }
+
+        // Category filter (only if selected)
+        if (!empty($category)) {
+            $query->whereHas('category', function ($q) use ($category) {
+                $q->where('comcategid', $category);
+            });
+        }
+
+        return $query->limit(20)->get();
     }
 
     public function listFacilityAgency(Request $request)
@@ -251,5 +286,36 @@ class MosItrController extends Controller
                 'message' => $e->getMessage(),
             ], 500);
         }
+    }
+
+    public function generatePdf($id)
+    {
+        $transfer = InventoryTransferReport::with([
+            'items.inventorydet', 
+            'transferType',
+            'fromEntity',
+            'toEntity',
+            'approvedBySignatory',
+            'issuedBySignatory',
+            'receivedByEmployee',
+        ])->findOrFail((int) $id);
+
+        $pdf = Pdf::loadView('pdf.itr', [
+            'transfer' => $transfer,
+        ])->setPaper('legal', 'portrait');
+
+        return $pdf->stream("ITR-{$transfer->itr_no}.pdf");
+    }
+
+    public function export(Request $request)
+    {
+        return Excel::download(
+            new ItrExcelExport(
+                $request->from_date,
+                $request->to_date,
+                $request->transfer_type_id
+            ),
+            'itr_records.xlsx'
+        );
     }
 }

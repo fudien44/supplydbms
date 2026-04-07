@@ -7,7 +7,7 @@ class EmployeeList extends Model
 {
     protected $table = 'vw_employeelist';
     protected $primaryKey = 'empid';
-    public $incrementing = true;
+    public $incrementing = false;
     protected $keyType = 'int';  
     protected $guarded = array();
 }

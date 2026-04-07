@@ -19,11 +19,11 @@ class Signatory extends Model
 
     public function scopeApprovedBy($query)
     {
-        return $query->active()->where('sign_categ', 'Approved By')->select('sign_id', 'sign_name'); // ✅ only these columns
+        return $query->active()->where('sign_categ', 'Approved By')->select('sign_id', 'sign_name', 'sign_position'); // ✅ only these columns
     }
 
     public function scopeIssuedBy($query)
     {
-        return $query->active()->where('sign_categ', 'Issued By')->select('sign_id', 'sign_name'); // ✅ only these columns
+        return $query->active()->where('sign_categ', 'Issued By')->select('sign_id', 'sign_name', 'sign_position'); // ✅ only these columns
     }
 }

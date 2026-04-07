@@ -21,6 +21,13 @@ class InventoryTransferReportItem extends Model
         'item_condition',
     ];
 
+
+
+    public function inventorydet()
+    {
+        return $this->belongsTo(GenInventory::class, 'inventory_id', 'commodityid');
+    }
+
     public function report()
     {
         return $this->belongsTo(InventoryTransferReport::class, 'transfer_report_id', 'id');
@@ -30,4 +37,6 @@ class InventoryTransferReportItem extends Model
     {
         return ($this->qty ?? 0) * ($this->unit_cost ?? 0);
     }
+
+
 }
