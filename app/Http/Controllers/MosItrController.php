@@ -12,12 +12,15 @@ use App\Models\FacilityAgencyList;
 use App\Models\CommodityMasterList;
 use App\Models\TransGenInventory;
 use App\Models\CommodityCategory;
+use App\Models\InventoryTransferAttachment;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Barryvdh\DomPDF\Facade\Pdf;
 use App\Exports\ItrExcelExport;
 use Maatwebsite\Excel\Facades\Excel;
+use Illuminate\Support\Facades\Storage;
+
 
 class MosItrController extends Controller
 {
@@ -221,7 +224,7 @@ class MosItrController extends Controller
             $perPage = min(100, (int) $request->input('per_page', 20));
 
             $query = InventoryTransferReport::query()
-                ->with(['transferType', 'toEntity', 'employeeInfo'])
+                ->with(['transferType', 'toEntity', 'employeeInfo', 'attachments'])
                 ->orderBy('date_issued', 'desc')
                 ->limit(20);
 
@@ -317,5 +320,80 @@ class MosItrController extends Controller
             ),
             'itr_records.xlsx'
         );
+    }
+
+    public function listAttachments($id)
+    {
+        $itr = InventoryTransferReport::findOrFail($id);
+        return response()->json($itr->attachments);
+    }
+
+    public function uploadAttachment(Request $request, $id)
+    {
+        $request->validate([
+            'file' => 'required|file|max:10240',
+        ]);
+
+        $itr = InventoryTransferReport::findOrFail($id);
+        $file = $request->file('file');
+
+        // Ensure directory exists
+        Storage::disk('public')->makeDirectory('attachments');
+
+        $path = $file->storeAs(
+            'attachments',
+            uniqid() . '_' . $file->getClientOriginalName(),
+            'public'
+        );
+
+        if (!$path) {
+            return response()->json(['error' => 'File failed to save'], 500);
+        }
+
+        \Log::info('Saved to: ' . $path);
+
+        $attachment = $itr->attachments()->create([
+            'filename' => $file->getClientOriginalName(),
+            'filepath' => $path,
+            'filetype' => $file->getClientOriginalExtension(),
+            'filesize' => $file->getSize(),
+        ]);
+
+        return response()->json([
+            'message' => 'Uploaded successfully',
+            'attachment' => $attachment,
+        ]);
+    }
+
+    public function downloadAttachment($itrId, $attachmentId)
+    {
+        $itr = InventoryTransferReport::findOrFail($itrId);
+        $attachment = $itr->attachments()->findOrFail($attachmentId);
+
+        $path = $attachment->filepath;
+
+        if (!Storage::disk('public')->exists($path)) {
+            return response()->json([
+                'error' => 'File not found',
+                'path' => $path,
+            ], 404);
+        }
+
+        return Storage::disk('public')->download($path, $attachment->filename);
+    }
+
+    public function deleteAttachment($itrId, $attachmentId)
+    {
+        $itr = InventoryTransferReport::findOrFail($itrId);
+        $attachment = $itr->attachments()->findOrFail($attachmentId);
+
+        // Delete physical file
+        if (Storage::disk('public')->exists($attachment->filepath)) {
+            Storage::disk('public')->delete($attachment->filepath);
+        }
+
+        $attachment->delete();
+
+        return response()->json(['message' => 'Attachment deleted successfully']);
     }
 }

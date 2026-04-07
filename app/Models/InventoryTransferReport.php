@@ -52,4 +52,9 @@ class InventoryTransferReport extends Model
     {
         return $this->belongsTo(EmployeeList::class, 'received_by', 'empid');
     }
+
+    public function attachments()
+    {
+        return $this->hasMany(InventoryTransferAttachment::class, 'transfer_report_id', 'id');
+    }
 }

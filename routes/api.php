@@ -18,11 +18,13 @@ Route::group(['prefix' => 'itr'], function () {
     Route::get('/listfacilityagency', [MosItrController::class, 'listFacilityAgency']);
     Route::post('/save', [MosItrController::class, 'save']);
     Route::get('/list', [MosItrController::class, 'listItr']);
-    Route::get('/{id}/pdf', [MosItrController::class, 'generatePdf']);
     Route::get('/export', [MosItrController::class, 'export']);
-    Route::get('/{id}', [MosItrController::class, 'showItr']);
+    Route::get('/{id}/pdf', [MosItrController::class, 'generatePdf']);
+    Route::get('/{id}/attachments', [MosItrController::class, 'listAttachments']); // ← ADD
+    Route::post('/{id}/upload-attachment', [MosItrController::class, 'uploadAttachment']);
+    Route::get('/{id}/attachments/{attachmentId}/download', [MosItrController::class, 'downloadAttachment']);
+    Route::get('/{id}', [MosItrController::class, 'showItr']); // ← keep /{id} catch-all LAST
     Route::delete('delete/{id}', [MosItrController::class, 'destroy']);
-    // Route::get('/getsignatories', [MosItrController::class, 'getSignatories']);
 });
 
 Route::post('/login', [loginController::class, 'login'])->name('login');
