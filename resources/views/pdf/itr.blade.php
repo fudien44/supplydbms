@@ -174,15 +174,15 @@
             <colgroup>
                 <col span="16">
             </colgroup>
-            <tr>
-                <td colspan="2" style="border: none; text-align: left;">
+            <tr style=" padding: 0px; margin: 0px;">
+                <td colspan="2" style="border: none; text-align: left; padding: 0px; margin: 0px;">
                     <span class="td1">Entity Name:</span>
                 </td>
-                <td colspan="6" class="td2">{{ $transfer->entity_name }}</td>
-                <td colspan="2" style="border: none; text-align: left;">
+                <td colspan="6" class="td2" style=" padding: 0px; margin: 0px;">{{ $transfer->entity_name }}</td>
+                <td colspan="2" style="border: none; text-align: left;  padding: 0px; margin: 0px;">
                     <span class="td1">Fund Cluster:</span>
                 </td>
-                <td colspan="6" class="td2">{{ $transfer->fund_cluster }}</td>
+                <td colspan="6" class="td2"style=" padding: 0px; margin: 0px;">{{ $transfer->fund_cluster }}</td>
             </tr>
         </table>
     </div>
@@ -215,6 +215,9 @@
                         {{ \Carbon\Carbon::parse($transfer->date_issued)->format('d-M-y') }}
                     </td>
                 </tr>
+                <tr style="height: 3px;">
+                    <td colspan="16" style="padding: 0; height: 5px; line-height: 1px;"></td>
+                </tr>
                 <tr>
                     <td colspan="16" style="border: none; text-align: left;">
                         <span class="td1">Transfer Type</span> (Check only one):
@@ -234,7 +237,8 @@
                                 </span>
                                 <span style="font-size: 9pt;">{{ $type->transtype }}</span>
                                 @if ($transfer->transfer_type_id == $type->transid && $transfer->others_specify)
-                                    <span style="font-size: 9pt; text-decoration: underline;">( {{ $transfer->others_specify }} )</span>
+                                    <span style="font-size: 9pt; text-decoration: underline;">(
+                                        {{ $transfer->others_specify }} )</span>
                                 @endif
                             </span>
                         @endforeach
@@ -270,9 +274,9 @@
                         <td colspan="2" class="td4">{{ $item->reference ?? '-' }}</td>
                         <td colspan="3" class="td4"><b>{{ $item->description ?? '-' }}</b></td>
                         <td class="td5-2">{{ $item->qty }}</td>
-                        <td colspan="2" class="td5-2 peso" style="text-align: left">
+                        <td colspan="2" class="td5-2 peso" style="text-align: right">
                             ₱{{ number_format($item->unit_cost, 2) }}</td>
-                        <td colspan="2" class="td5-2 peso" style="text-align: left">
+                        <td colspan="2" class="td5-2 peso" style="text-align: right">
                             ₱{{ number_format($item->qty * $item->unit_cost, 2) }}
                         </td>
                         <td colspan="3" class="td4" style="text-align: center">{{ $item->item_condition ?? '-' }}
@@ -293,7 +297,7 @@
             <tfoot>
                 <tr>
                     <td colspan="11" class="td5" style="text-align: right;">Total Amount:</td>
-                    <td colspan="2" class="td5-2 peso" style="text-align: left">
+                    <td colspan="2" class="td5-2 peso" style="text-align: right">
                         ₱{{ number_format($transfer->total_amount, 2) }}</td>
                     <td colspan="3"></td>
                 </tr>
