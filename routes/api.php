@@ -14,10 +14,26 @@ Route::get('/user', function (Request $request) {
 })->middleware('auth:sanctum');
 
 Route::get('/item-master-list', [RPCPPEController::class, 'masterlist']);
-Route::get('/acc-officer', [RPCPPEController::class, 'accOfficer']);
+Route::get('/acc-officer', [RPCPPEController::class, 'accountableOfficers']);
 Route::get('/categories', [RPCPPEController::class, 'categories']);
-Route::get('/fund-cluster', [RPCPPEController::class, 'fund_cluster']);
-Route::get('/entities', [RPCPPEController::class, 'entity']);
+
+Route::get('/ppe-types', [RPCPPEController::class, 'getPpeTypes']);
+Route::post('/ppe-types', [RPCPPEController::class, 'storePpeType']);
+Route::put('/ppe-types/{id}', [RPCPPEController::class, 'updatePpeType']);
+Route::delete('/ppe-types/{id}', [RPCPPEController::class, 'deletePpeType']);
+
+Route::get('/articles', [RPCPPEController::class, 'getArticles']);
+Route::post('/articles', [RPCPPEController::class, 'storeArticle']);
+Route::put('/articles/{id}', [RPCPPEController::class, 'updateArticle']);
+Route::delete('/articles/{id}', [RPCPPEController::class, 'deleteArticle']);
+
+Route::get('/rpcppe', [RPCPPEController::class, 'getItems']);
+Route::post('/rpcppe/store', [RPCPPEController::class, 'storeItems']);
+Route::post('/rpcppe/delete', [RPCPPEController::class, 'deleteItems']);
+Route::post('/rpcppe/update', [RPCPPEController::class, 'updateItems']);
+
+Route::get('/masterlist-mapping', [RPCPPEController::class, 'getMasterlistMapping']);
+Route::post('/masterlist-mapping/save', [RPCPPEController::class, 'saveMasterlistMapping']);
 
 Route::post('/login', [loginController::class, 'login'])->name('login');
 
