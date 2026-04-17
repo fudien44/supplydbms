@@ -32,8 +32,9 @@ Route::post('/rpcppe/store', [RPCPPEController::class, 'storeItems']);
 Route::post('/rpcppe/delete', [RPCPPEController::class, 'deleteItems']);
 Route::post('/rpcppe/update', [RPCPPEController::class, 'updateItems']);
 
-Route::get('/masterlist-mapping', [RPCPPEController::class, 'getMasterlistMapping']);
-Route::post('/masterlist-mapping/save', [RPCPPEController::class, 'saveMasterlistMapping']);
+Route::post('/rpcppe/preview', [RPCPPEController::class, 'previewReport']);
+Route::post('/rpcppe/export-pdf', [RPCPPEController::class, 'exportPdf']);
+Route::post('/rpcppe/export-excel', [RPCPPEController::class, 'exportExcel']);
 
 Route::post('/login', [loginController::class, 'login'])->name('login');
 

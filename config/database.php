@@ -112,6 +112,9 @@ return [
             'prefix_indexes' => true,
             'encrypt' => env('DB_ENCRYPT', 'no'),
             'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', true),
+            'timeout'                 => 60,       // query timeout in seconds
+            'loginTimeout'            => 30,       // connection timeout in seconds
+            'MultipleActiveResultSets'=> false,
         ],
 
     ],
