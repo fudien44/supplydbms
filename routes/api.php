@@ -4,13 +4,36 @@ use App\Http\Controllers\loginController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\RPCPPE\RPCPPEController;
+use Illuminate\Support\Facades\Auth;
 use App\Http\Controllers\MosItrController;
 use App\Http\Controllers\MRInventoryRecordsController;
 
 Route::get('/user', function (Request $request) {
     return $request->user();
 })->middleware('auth:sanctum');
+Route::get('/item-master-list', [RPCPPEController::class, 'masterlist']);
+Route::get('/acc-officer', [RPCPPEController::class, 'accountableOfficers']);
+Route::get('/categories', [RPCPPEController::class, 'categories']);
 
+Route::get('/ppe-types', [RPCPPEController::class, 'getPpeTypes']);
+Route::post('/ppe-types', [RPCPPEController::class, 'storePpeType']);
+Route::put('/ppe-types/{id}', [RPCPPEController::class, 'updatePpeType']);
+Route::delete('/ppe-types/{id}', [RPCPPEController::class, 'deletePpeType']);
+
+Route::get('/articles', [RPCPPEController::class, 'getArticles']);
+Route::post('/articles', [RPCPPEController::class, 'storeArticle']);
+Route::put('/articles/{id}', [RPCPPEController::class, 'updateArticle']);
+Route::delete('/articles/{id}', [RPCPPEController::class, 'deleteArticle']);
+
+Route::get('/rpcppe', [RPCPPEController::class, 'getItems']);
+Route::post('/rpcppe/store', [RPCPPEController::class, 'storeItems']);
+Route::post('/rpcppe/delete', [RPCPPEController::class, 'deleteItems']);
+Route::post('/rpcppe/update', [RPCPPEController::class, 'updateItems']);
+
+Route::post('/rpcppe/preview', [RPCPPEController::class, 'previewReport']);
+Route::post('/rpcppe/export-pdf', [RPCPPEController::class, 'exportPdf']);
+Route::post('/rpcppe/export-excel', [RPCPPEController::class, 'exportExcel']);
 Route::group(['prefix' => 'itr'], function () {
     Route::get('/itrindex', [MosItrController::class, 'index']);
     Route::get('/listinventory', [MosItrController::class, 'listInventory']);
