@@ -37,8 +37,8 @@ class RPCPPEController extends Controller
             $search = trim((string) $request->input('search', ''));
 
             $query = DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.rpcppe as r')
-                ->leftJoin('EstockDbsv2_devdev.dbo.articles as a', 'a.id', '=', 'r.article_id')
+                ->table('EstockDbsv2.dbo.rpcppe as r')
+                ->leftJoin('EstockDbsv2.dbo.articles as a', 'a.id', '=', 'r.article_id')
                 ->select(
                     'r.ID',
                     'r.item_id',
@@ -109,7 +109,7 @@ class RPCPPEController extends Controller
 
             foreach ($request->items as $item) {
                 $articleId = DB::connection('sqlsrv')
-                    ->table('EstockDbsv2_devdev.dbo.articles')
+                    ->table('EstockDbsv2.dbo.articles')
                     ->whereRaw('LTRIM(RTRIM(article_name)) = ?', [trim($item['article'] ?? '')])
                     ->value('id');
 
@@ -124,7 +124,7 @@ class RPCPPEController extends Controller
                 }
 
                 $alreadyExists = DB::connection('sqlsrv')
-                    ->table('EstockDbsv2_devdev.dbo.rpcppe')
+                    ->table('EstockDbsv2.dbo.rpcppe')
                     ->where('item_id', $itemId)
                     ->exists();
 
@@ -156,7 +156,7 @@ class RPCPPEController extends Controller
 
             if (!empty($rows)) {
                 DB::connection('sqlsrv')
-                    ->table('EstockDbsv2_devdev.dbo.rpcppe')
+                    ->table('EstockDbsv2.dbo.rpcppe')
                     ->insert($rows);
             }
 
@@ -182,7 +182,7 @@ class RPCPPEController extends Controller
         $ids = $request->input('ids', []);
 
         DB::connection('sqlsrv')
-            ->table('EstockDbsv2_devdev.dbo.rpcppe')
+            ->table('EstockDbsv2.dbo.rpcppe')
             ->whereIn('ID', $ids)
             ->delete();
 
@@ -215,7 +215,7 @@ class RPCPPEController extends Controller
                 }
 
                 $articleId = DB::connection('sqlsrv')
-                    ->table('EstockDbsv2_devdev.dbo.articles')
+                    ->table('EstockDbsv2.dbo.articles')
                     ->whereRaw('LTRIM(RTRIM(article_name)) = ?', [$article])
                     ->value('id');
 
@@ -224,7 +224,7 @@ class RPCPPEController extends Controller
                 }
 
                 DB::connection('sqlsrv')
-                    ->table('EstockDbsv2_devdev.dbo.rpcppe')
+                    ->table('EstockDbsv2.dbo.rpcppe')
                     ->where('item_id', $itemId)
                     ->update([
                         'article_id'    => $articleId,
@@ -309,7 +309,7 @@ class RPCPPEController extends Controller
         try {
             $data = DB::connection('sqlsrv')->select("
                 SELECT *
-                FROM [EstockDbsv2_devdev].[dbo].[tbl_mrcategory]
+                FROM [EstockDbsv2].[dbo].[tbl_mrcategory]
             ");
 
             return response()->json([
@@ -328,8 +328,8 @@ class RPCPPEController extends Controller
     {
         try {
             $data = DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.articles as a')
-                ->leftJoin('EstockDbsv2_devdev.dbo.ppe_types as pt', 'pt.id', '=', 'a.ppe_type_id')
+                ->table('EstockDbsv2.dbo.articles as a')
+                ->leftJoin('EstockDbsv2.dbo.ppe_types as pt', 'pt.id', '=', 'a.ppe_type_id')
                 ->select(
                     'a.id',
                     'a.article_name',
@@ -360,7 +360,7 @@ class RPCPPEController extends Controller
             ]);
 
             $id = DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.articles')
+                ->table('EstockDbsv2.dbo.articles')
                 ->insertGetId([
                     'article_name' => $request->article_name,
                     'ppe_type_id'  => $request->ppe_type_id,
@@ -397,7 +397,7 @@ class RPCPPEController extends Controller
             ]);
 
             DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.articles')
+                ->table('EstockDbsv2.dbo.articles')
                 ->where('id', $id)
                 ->update([
                     'article_name' => $request->article_name,
@@ -427,7 +427,7 @@ class RPCPPEController extends Controller
     {
         try {
             DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.articles')
+                ->table('EstockDbsv2.dbo.articles')
                 ->where('id', $id)
                 ->delete();
 
@@ -447,7 +447,7 @@ class RPCPPEController extends Controller
     {
         try {
             $data = DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.ppe_types')
+                ->table('EstockDbsv2.dbo.ppe_types')
                 ->select(
                     'id',
                     'ppe_name',
@@ -475,7 +475,7 @@ class RPCPPEController extends Controller
             ]);
 
             $id = DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.ppe_types')
+                ->table('EstockDbsv2.dbo.ppe_types')
                 ->insertGetId([
                     'ppe_name'   => $request->ppe_name,
                     'is_active'  => 1,
@@ -510,7 +510,7 @@ class RPCPPEController extends Controller
             ]);
 
             DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.ppe_types')
+                ->table('EstockDbsv2.dbo.ppe_types')
                 ->where('id', $id)
                 ->update([
                     'ppe_name'   => $request->ppe_name,
@@ -539,7 +539,7 @@ class RPCPPEController extends Controller
     {
         try {
             $articleCount = DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.articles')
+                ->table('EstockDbsv2.dbo.articles')
                 ->where('ppe_type_id', $id)
                 ->count();
 
@@ -551,7 +551,7 @@ class RPCPPEController extends Controller
             }
 
             DB::connection('sqlsrv')
-                ->table('EstockDbsv2_devdev.dbo.ppe_types')
+                ->table('EstockDbsv2.dbo.ppe_types')
                 ->where('id', $id)
                 ->delete();
 
@@ -588,9 +588,9 @@ class RPCPPEController extends Controller
         $asOfDate = $request->input('as_of_date');
 
         $query = DB::connection('sqlsrv')
-            ->table('EstockDbsv2_devdev.dbo.rpcppe as r')
-            ->leftJoin('EstockDbsv2_devdev.dbo.articles as a', 'a.id', '=', 'r.article_id')
-            ->leftJoin('EstockDbsv2_devdev.dbo.ppe_types as pt', 'pt.id', '=', 'a.ppe_type_id')
+            ->table('EstockDbsv2.dbo.rpcppe as r')
+            ->leftJoin('EstockDbsv2.dbo.articles as a', 'a.id', '=', 'r.article_id')
+            ->leftJoin('EstockDbsv2.dbo.ppe_types as pt', 'pt.id', '=', 'a.ppe_type_id')
             ->select(
                 'r.ID',
                 'r.item_id',
@@ -663,7 +663,7 @@ class RPCPPEController extends Controller
         }
 
         $officer = DB::connection('sqlsrv')
-            ->table('EstockDbsv2_devdev.dbo.vw_employeelist as e')
+            ->table('EstockDbsv2.dbo.vw_employeelist as e')
             ->select([
                 DB::raw('e.fullname as name'),
                 DB::raw("
@@ -744,7 +744,7 @@ class RPCPPEController extends Controller
         }
 
         $ppeName = DB::connection('sqlsrv')
-            ->table('EstockDbsv2_devdev.dbo.ppe_types')
+            ->table('EstockDbsv2.dbo.ppe_types')
             ->where('id', $propertyTypeId)
             ->value('ppe_name');
 
