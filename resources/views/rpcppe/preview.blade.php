@@ -125,11 +125,21 @@
 <body>
 
 <div class="title">
-    REPORT ON THE PHYSICAL COUNT OF PROPERTY, PLANT AND EQUIPMENT (RPCPPE)
+    @if(($filters['form_type'] ?? '') === 'PPE')
+        REPORT ON THE PHYSICAL COUNT OF PROPERTY, PLANT AND EQUIPMENT (RPCPPE)
+    @elseif(($filters['form_type'] ?? '') === 'RPCI')
+        REPORT ON THE PHYSICAL COUNT OF INVENTORIES
+    @else
+        REPORT ON THE PHYSICAL COUNT OF SEMI-EXPENDABLE PROPERTY
+    @endif
 </div>
 
 <div class="subtitle">
-    <strong>{{ $filters['ppe_name'] ?? 'All PPE Types' }}</strong>
+    @if(($filters['form_type'] ?? '') === 'RPCI')
+        <strong>{{ $filters['ppe_name'] ?? 'All Inventory Items' }}</strong>
+    @else
+        <strong>{{ $filters['ppe_name'] ?? 'All PPE Types' }}</strong>
+    @endif
 </div>
 
 <div class="subtitle">
@@ -139,7 +149,7 @@
         : now()->format('F d, Y') }}
 </div>
 
-@if(($filters['item_status'] ?? '') === 'issued' && !empty($accountableOfficer))
+@if(!empty($accountableOfficer))
     <div class="meta-line">
         for which
         <strong>{{ $accountableOfficer['name'] ?? '' }}</strong>
@@ -150,14 +160,10 @@
             , <strong>{{ $accountableOfficer['office'] }}</strong>
         @endif
         is accountable after having to assume such accountability
+        <span style="display:inline-block; border-bottom:1px solid #000; min-width:90px;">&nbsp;</span>.
     </div>
 @endif
 
-@if(!empty($filters['form_type']))
-    <div class="form-subtitle">
-        <small>{{ $filters['form_type'] }}</small>
-    </div>
-@endif
 
 <table>
     <thead>
@@ -280,6 +286,39 @@
             <td></td>
         </tr>
     </tfoot>
+</table>
+
+@php
+    $sig = $signatories ?? [];
+    $sigBlocks = [
+        ['label' => 'Certified Correct by:', 'data' => $sig['certified'] ?? [], 'role' => 'Inventory Committee Chair and Members'],
+        ['label' => 'Approved by:',          'data' => $sig['approved'] ?? [],  'role' => 'Head of Agency/Entity or Authorized Representative'],
+        ['label' => 'Verified by:',          'data' => $sig['verified'] ?? [],  'role' => 'COA Representative'],
+    ];
+@endphp
+
+<table class="signatories" style="width:100%; margin-top:34px; border:none; border-collapse:collapse;">
+    <tr>
+        @foreach($sigBlocks as $block)
+            <td style="width:33.3%; border:none; vertical-align:top; padding:0 14px;">
+                {{ $block['label'] }}
+            </td>
+        @endforeach
+    </tr>
+    <tr>
+        @foreach($sigBlocks as $block)
+            <td style="border:none; vertical-align:bottom; padding:40px 14px 0; text-align:center;">
+                @if(!empty($block['data']['name']))
+                    <div style="font-weight:bold; text-transform:uppercase; margin-bottom:10px;">{{ $block['data']['name'] }}</div>
+                @else
+                    <div style="margin-bottom:10px;">&nbsp;</div>
+                @endif
+                <div style="border-top:1px solid #000; margin:0 6px; padding-top:2px;">
+                    <div style="font-size:8px;">Signature over Printed Name of {{ $block['role'] }}</div>
+                </div>
+            </td>
+        @endforeach
+    </tr>
 </table>
 
 <script type="text/php">
