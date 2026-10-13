@@ -9,20 +9,221 @@ use Barryvdh\DomPDF\Facade\Pdf;
 
 class RPCPPEController extends Controller
 {
-    public function masterlist()
+    /**
+     * Masterlist for the Add Items picker.
+     *
+     * Produces the same shape as vw_MainInventory but computes the "latest
+     * ICS/PAR issuance per inventory" once into PHP maps (small, fast tables),
+     * then joins the main inventory directly. This avoids the expensive view
+     * (whose CTEs get re-evaluated per row — ~8 min for a full fetch). The
+     * vw_MainInventory view itself is left untouched for the old system.
+     */
+    public function masterlist(Request $request)
     {
         try {
-            $data = DB::connection('sqlsrv')
-                ->table('vw_MainInventory')
-                ->orderBy('item_id', 'desc')
+            $conn = DB::connection('sqlsrv');
+
+            $search = trim((string) $request->input('search', ''));
+
+            // Categories arrive as composite values "W2:<id>" / "W1:<id>" (plain
+            // numbers are treated as World 2 for backward compatibility).
+            $rawCats = $request->input('categories', []);
+            $rawCats = is_array($rawCats) ? $rawCats : [$rawCats];
+            $w2Cats  = [];
+            $w1Cats  = [];
+            foreach ($rawCats as $c) {
+                $c = (string) $c;
+                if (str_starts_with($c, 'W1:')) $w1Cats[] = (int) substr($c, 3);
+                elseif (str_starts_with($c, 'W2:')) $w2Cats[] = (int) substr($c, 3);
+                elseif (is_numeric($c)) $w2Cats[] = (int) $c;
+            }
+            $w2Cats = array_values(array_filter($w2Cats));
+            $w1Cats = array_values(array_filter($w1Cats));
+            $anyCategory = !empty($w2Cats) || !empty($w1Cats);
+
+            $valueMin   = $request->input('value_min');
+            $valueMin   = is_numeric($valueMin) ? (float) $valueMin : null;
+            $valueMax   = $request->input('value_max');
+            $valueMax   = is_numeric($valueMax) ? (float) $valueMax : null;
+            $perPage    = (int) $request->input('per_page', 20);
+            $perPage  = ($perPage > 0 && $perPage <= 100) ? $perPage : 20;
+            $page     = max(1, (int) $request->input('page', 1));
+            $offset   = ($page - 1) * $perPage;
+
+            $like = '%' . $search . '%';
+
+            // Resolve description matches on the small commodity tables up front
+            // (avoids an OR predicate spanning a join on the large text column).
+            $w2Com = [];
+            $w1Com = [];
+            if ($search !== '') {
+                $w2Com = $conn->table('dbo.tbl_mrcommodity')
+                    ->where('com_desc', 'like', $like)->pluck('OS_code')
+                    ->map(fn ($v) => (int) $v)->filter()->values()->all();
+                $w1Com = $conn->table('dbo.ref_commoditymasterlist')
+                    ->where('com_desc', 'like', $like)->pluck('com_code')
+                    ->map(fn ($v) => (int) $v)->filter()->values()->all();
+            }
+
+            // The picker counts ONE classification at a time (keeps the list small):
+            //   'ppe'  → property categories, unit cost >= capitalization threshold
+            //   'semi' → property categories, unit cost <  capitalization threshold
+            //   'rpci' → consumable/inventory categories (no threshold)
+            // Default (empty) behaves like property (ppe + semi, no threshold split).
+            $classification = strtolower(trim((string) $request->input('classification', '')));
+            $threshold = $this->capitalizationThreshold();
+
+            // Base category whitelist for the chosen classification. User-selected
+            // categories are intersected with it (they can never widen the set).
+            $base = $classification === 'rpci'
+                ? $this->rpciCategoryCodes()
+                : $this->ppeEligibleCategoryCodes();
+            $w2Allowed = !empty($w2Cats) ? array_values(array_intersect($w2Cats, $base['W2'])) : $base['W2'];
+            $w1Allowed = !empty($w1Cats) ? array_values(array_intersect($w1Cats, $base['W1'])) : $base['W1'];
+
+            // World 2 (MR / office supplies / property) base query.
+            $buildW2 = function () use ($conn, $w2Allowed, $valueMin, $valueMax, $search, $like, $w2Com, $classification, $threshold) {
+                $q = $conn->table('dbo.tbl_mr_Maininventory as mi')
+                    ->where(function ($v) { $v->whereNull('mi.void')->orWhere('mi.void', 0); });
+                $q->whereIn('mi.category_ID', $w2Allowed); // empty => no rows
+                if ($classification === 'ppe') $q->where('mi.u_cost', '>=', $threshold);
+                elseif ($classification === 'semi') $q->where('mi.u_cost', '<', $threshold);
+                if ($valueMin !== null) $q->where('mi.u_cost', '>=', $valueMin);
+                if ($valueMax !== null) $q->where('mi.u_cost', '<=', $valueMax);
+                if ($search !== '') {
+                    $q->where(function ($s) use ($like, $w2Com) {
+                        $s->where('mi.stock_no', 'like', $like)->orWhere('mi.po_no', 'like', $like)
+                          ->orWhere('mi.source', 'like', $like)->orWhere('mi.remarks', 'like', $like);
+                        if (!empty($w2Com)) $s->orWhereIn('mi.commodity_ID', $w2Com);
+                    });
+                }
+                return $q;
+            };
+
+            // World 1 (consumables / general supply) base query.
+            $buildW1 = function () use ($conn, $w1Allowed, $valueMin, $valueMax, $search, $like, $w1Com, $classification, $threshold) {
+                $q = $conn->table('dbo.trans_gen_inventory as g')
+                    ->where(function ($v) { $v->whereNull('g.void')->orWhere('g.void', 0); });
+                $q->whereIn('g.typeofcomid', $w1Allowed); // empty => no rows
+                if ($classification === 'ppe') $q->where('g.unitcost', '>=', $threshold);
+                elseif ($classification === 'semi') $q->where('g.unitcost', '<', $threshold);
+                if ($valueMin !== null) $q->where('g.unitcost', '>=', $valueMin);
+                if ($valueMax !== null) $q->where('g.unitcost', '<=', $valueMax);
+                if ($search !== '') {
+                    $q->where(function ($s) use ($like, $w1Com) {
+                        $s->where('g.stockno', 'like', $like)->orWhere('g.poptrno', 'like', $like)
+                          ->orWhere('g.source', 'like', $like);
+                        if (!empty($w1Com)) $s->orWhereIn('g.commodityid', $w1Com);
+                    });
+                }
+                return $q;
+            };
+
+            // Decide which worlds to include based on which categories are selected.
+            // No category filter → both worlds. W2 cats only → W2. W1 cats only → W1.
+            $includeW2 = !$anyCategory || !empty($w2Cats);
+            $includeW1 = !$anyCategory || !empty($w1Cats);
+
+            $total = 0;
+            if ($includeW2) $total += $buildW2()->count();
+            if ($includeW1) $total += $buildW1()->count();
+
+            // Page: union base columns (+ uom join, which is cheap) WITHOUT the
+            // heavy com_desc text — that's resolved per page below.
+            $w2Sel = $buildW2()
+                ->leftJoin('dbo.ref_uom as uom', 'mi.unitofmeasure', '=', 'uom.uomid')
+                ->selectRaw("'W2' as world, mi.ID as item_id, mi.commodity_ID as commodity_id, mi.category_ID as category_id, mi.qty as qty, mi.u_cost as u_cost, mi.amt as amt, mi.date_acquired as date_acquired, mi.po_no as po_no, mi.stock_no as stock_no, COALESCE(NULLIF(LTRIM(RTRIM(uom.uom_name)), ''), CAST(mi.unitofmeasure AS VARCHAR(100)), '') as unitofmeasure");
+
+            $w1Sel = $buildW1()
+                ->leftJoin('dbo.ref_commoditymasterlist as cm', 'g.commodityid', '=', 'cm.com_code')
+                ->leftJoin('dbo.ref_uom as uom', 'cm.com_uomid', '=', 'uom.uomid')
+                ->selectRaw("'W1' as world, g.gid as item_id, g.commodityid as commodity_id, g.typeofcomid as category_id, g.origqty as qty, g.unitcost as u_cost, (g.origqty * g.unitcost) as amt, g.dateaquired as date_acquired, g.poptrno as po_no, g.stockno as stock_no, COALESCE(NULLIF(LTRIM(RTRIM(uom.uom_name)), ''), '') as unitofmeasure");
+
+            if ($includeW2 && $includeW1) $union = $w2Sel->unionAll($w1Sel);
+            elseif ($includeW1) $union = $w1Sel;
+            else $union = $w2Sel;
+
+            $pageRows = $conn->query()->fromSub($union, 'x')
+                ->orderByRaw('x.world DESC, x.item_id DESC')
+                ->offset($offset)->limit($perPage)
                 ->get();
 
-            return response()->json([
-                'status' => 'success',
-                'data'   => $data,
-                'total'  => $data->count(),
-            ], 200);
+            // Resolve com_desc for just this page, per world.
+            $w2ComIds = []; $w1ComIds = []; $w2Ids = [];
+            foreach ($pageRows as $r) {
+                if ($r->world === 'W2') { $w2ComIds[] = (int) $r->commodity_id; $w2Ids[] = (int) $r->item_id; }
+                else { $w1ComIds[] = (int) $r->commodity_id; }
+            }
 
+            $w2Desc = [];
+            if (count($w2ComIds)) {
+                foreach ($conn->table('dbo.tbl_mrcommodity')
+                    ->whereIn('OS_code', array_values(array_unique($w2ComIds)))
+                    ->get(['OS_code', DB::raw('CAST(com_desc AS VARCHAR(1000)) as com_desc')]) as $c) {
+                    $w2Desc[(int) $c->OS_code] = $c->com_desc;
+                }
+            }
+            $w1Desc = [];
+            if (count($w1ComIds)) {
+                // trans_gen_inventory.commodityid maps to ref_commoditymasterlist.com_code
+                // (NOT comid) — mirrors vw_geninventory's join.
+                foreach ($conn->table('dbo.ref_commoditymasterlist')
+                    ->whereIn('com_code', array_values(array_unique($w1ComIds)))
+                    ->get(['com_code', DB::raw('CAST(com_desc AS VARCHAR(1000)) as com_desc')]) as $c) {
+                    $w1Desc[(int) $c->com_code] = $c->com_desc;
+                }
+            }
+
+            // Latest ICS/PAR issuance for the World 2 items on this page. This only
+            // supplies the "Issued To" custody info (who holds an item) — it is NOT
+            // used to classify PPE vs semi-expendable (that is unit value vs threshold).
+            $icsMap = [];
+            $parMap = [];
+            if (count($w2Ids)) {
+                $ph = implode(',', array_fill(0, count($w2Ids), '?'));
+                foreach ($conn->select("
+                    SELECT inventory_ID, emp_no, issuance_type, issuance_id FROM (
+                        SELECT il.inventory_ID, LTRIM(RTRIM(ics.emp_no)) AS emp_no, LTRIM(RTRIM(ics.ICS_No)) AS issuance_type, ics.ID AS issuance_id,
+                               ROW_NUMBER() OVER (PARTITION BY il.inventory_ID ORDER BY il.ID DESC) AS rn
+                        FROM dbo.tbl_mricslist il INNER JOIN dbo.tbl_mrics ics ON il.ics_ID = ics.ID
+                        WHERE il.inventory_ID IN ($ph) AND (il.void IS NULL OR il.void = 0) AND (ics.void IS NULL OR ics.void = 0)
+                    ) x WHERE x.rn = 1
+                ", $w2Ids) as $r) { $icsMap[(int) $r->inventory_ID] = $r; }
+
+                foreach ($conn->select("
+                    SELECT inventory_ID, emp_no, issuance_type, issuance_id FROM (
+                        SELECT pl.inventory_ID, LTRIM(RTRIM(par.emp_no)) AS emp_no, LTRIM(RTRIM(par.PAR_No)) AS issuance_type, par.ID AS issuance_id,
+                               ROW_NUMBER() OVER (PARTITION BY pl.inventory_ID ORDER BY pl.ID DESC) AS rn
+                        FROM dbo.tbl_mrparlist pl INNER JOIN dbo.tbl_mrpar par ON pl.par_ID = par.ID
+                        WHERE pl.inventory_ID IN ($ph) AND (pl.void IS NULL OR pl.void = 0) AND (par.void IS NULL OR par.void = 0)
+                    ) x WHERE x.rn = 1
+                ", $w2Ids) as $r) { $parMap[(int) $r->inventory_ID] = $r; }
+            }
+
+            $data = collect($pageRows)->map(function ($r) use ($w2Desc, $w1Desc, $icsMap, $parMap) {
+                $r->com_desc     = $r->world === 'W2'
+                    ? ($w2Desc[(int) $r->commodity_id] ?? '')
+                    : ($w1Desc[(int) $r->commodity_id] ?? '');
+                $r->commodity_ID = $r->commodity_id;
+                $r->category_ID  = $r->category_id;
+                $r->remarks      = '';
+                $r->source       = $r->world === 'W2' ? 'Office' : 'General';
+
+                $iss = $r->world === 'W2' ? ($icsMap[(int) $r->item_id] ?? $parMap[(int) $r->item_id] ?? null) : null;
+                $r->emp_no        = $iss->emp_no ?? '';
+                $r->issuance_type = $iss->issuance_type ?? '';
+                $r->issuance_id   = $iss->issuance_id ?? 0;
+
+                return $r;
+            });
+
+            return response()->json([
+                'status'   => 'success',
+                'data'     => $data,
+                'total'    => $total,
+                'page'     => $page,
+                'per_page' => $perPage,
+            ], 200);
         } catch (\Throwable $e) {
             return response()->json([
                 'status'  => 'error',
@@ -37,14 +238,15 @@ class RPCPPEController extends Controller
             $search = trim((string) $request->input('search', ''));
 
             $query = DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.rpcppe as r')
-                ->leftJoin('EstockDbsv2.dbo.articles as a', 'a.id', '=', 'r.article_id')
+                ->table('dbo.rpcppe as r')
+                ->leftJoin('dbo.articles as a', 'a.id', '=', 'r.article_id')
                 ->select(
                     'r.ID',
                     'r.item_id',
                     'r.article_id',
                     'a.article_name',
                     'r.category_id',
+                    'r.source_world',
                     'r.com_desc',
                     'r.unitofmeasure',
                     'r.po_no',
@@ -81,6 +283,18 @@ class RPCPPEController extends Controller
                 ->orderBy('r.ID', 'desc')
                 ->get();
 
+            // Tag each row with its nature: RPCI (inventory/consumable) vs PROPERTY
+            // (PPE/Semi, split later by threshold). Lets the dashboard count RPCI
+            // separately instead of lumping consumables into Semi-Expendable.
+            $rpci = $this->rpciCategoryCodes();
+            $data->transform(function ($r) use ($rpci) {
+                $world = $r->source_world ?: 'W2';
+                $code  = (int) $r->category_id;
+                $r->report_type = in_array($code, $rpci[$world] ?? [], true) ? 'RPCI' : 'PROPERTY';
+
+                return $r;
+            });
+
             return response()->json([
                 'status' => 'success',
                 'data'   => $data,
@@ -109,7 +323,7 @@ class RPCPPEController extends Controller
 
             foreach ($request->items as $item) {
                 $articleId = DB::connection('sqlsrv')
-                    ->table('EstockDbsv2.dbo.articles')
+                    ->table('dbo.articles')
                     ->whereRaw('LTRIM(RTRIM(article_name)) = ?', [trim($item['article'] ?? '')])
                     ->value('id');
 
@@ -123,9 +337,13 @@ class RPCPPEController extends Controller
                     throw new \Exception('Main inventory item_id is required.');
                 }
 
+                $world = in_array(($item['world'] ?? 'W2'), ['W1', 'W2'], true) ? $item['world'] : 'W2';
+
+                // Dedup within the same world (W1 gid and W2 ID are separate spaces).
                 $alreadyExists = DB::connection('sqlsrv')
-                    ->table('EstockDbsv2.dbo.rpcppe')
+                    ->table('dbo.rpcppe')
                     ->where('item_id', $itemId)
+                    ->where('source_world', $world)
                     ->exists();
 
                 if ($alreadyExists) {
@@ -134,6 +352,7 @@ class RPCPPEController extends Controller
 
                 $rows[] = [
                     'item_id'        => $itemId,
+                    'source_world'   => $world,
                     'article_id'     => $articleId,
                     'category_id'    => $item['category_id'] ?? null,
                     'com_desc'       => $item['description'] ?? null,
@@ -156,7 +375,7 @@ class RPCPPEController extends Controller
 
             if (!empty($rows)) {
                 DB::connection('sqlsrv')
-                    ->table('EstockDbsv2.dbo.rpcppe')
+                    ->table('dbo.rpcppe')
                     ->insert($rows);
             }
 
@@ -177,12 +396,81 @@ class RPCPPEController extends Controller
         }
     }
 
+    /**
+     * Add a single manually-entered item (not from the masterlist).
+     */
+    public function storeManualItem(Request $request)
+    {
+        $validated = $request->validate([
+            'article'        => 'required|string',
+            'description'    => 'nullable|string',
+            'serialNo'       => 'nullable|string',
+            'unit'           => 'nullable|string',
+            'unitValue'      => 'nullable|numeric',
+            'balancePerCard' => 'nullable|numeric',
+            'dateAcquired'   => 'nullable|date',
+            'remarks'        => 'nullable|string',
+            'category_id'    => 'nullable|integer',
+        ]);
+
+        try {
+            $articleId = DB::connection('sqlsrv')
+                ->table('dbo.articles')
+                ->whereRaw('LTRIM(RTRIM(article_name)) = ?', [trim($validated['article'])])
+                ->value('id');
+
+            if (!$articleId) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Selected article was not found: ' . $validated['article'],
+                ], 422);
+            }
+
+            $qty    = is_numeric($validated['balancePerCard'] ?? null) ? (float) $validated['balancePerCard'] : 0;
+            $uCost  = is_numeric($validated['unitValue'] ?? null) ? (float) $validated['unitValue'] : 0;
+
+            $id = DB::connection('sqlsrv')
+                ->table('dbo.rpcppe')
+                ->insertGetId([
+                    'item_id'       => 0,
+                    'article_id'    => $articleId,
+                    'category_id'   => $validated['category_id'] ?? null,
+                    'com_desc'      => $validated['description'] ?? null,
+                    'unitofmeasure' => $validated['unit'] ?? null,
+                    'po_no'         => $validated['serialNo'] ?? null,
+                    'date_acquired' => !empty($validated['dateAcquired']) ? $validated['dateAcquired'] : null,
+                    'u_cost'        => $uCost,
+                    'qty'           => $qty,
+                    'amt'           => $qty * $uCost,
+                    'stock_no'      => null,
+                    'source'        => 'Manual Entry',
+                    'remarks'       => isset($validated['remarks']) && $validated['remarks'] !== '' ? $validated['remarks'] : null,
+                    'emp_no'        => '',
+                    'issuance_type' => '',
+                    'issuance_id'   => 0,
+                    'created_at'    => now(),
+                    'updated_at'    => now(),
+                ], 'ID');
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Item added successfully.',
+                'id'      => $id,
+            ], 200);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
     public function deleteItems(Request $request)
     {
         $ids = $request->input('ids', []);
 
         DB::connection('sqlsrv')
-            ->table('EstockDbsv2.dbo.rpcppe')
+            ->table('dbo.rpcppe')
             ->whereIn('ID', $ids)
             ->delete();
 
@@ -215,7 +503,7 @@ class RPCPPEController extends Controller
                 }
 
                 $articleId = DB::connection('sqlsrv')
-                    ->table('EstockDbsv2.dbo.articles')
+                    ->table('dbo.articles')
                     ->whereRaw('LTRIM(RTRIM(article_name)) = ?', [$article])
                     ->value('id');
 
@@ -224,7 +512,7 @@ class RPCPPEController extends Controller
                 }
 
                 DB::connection('sqlsrv')
-                    ->table('EstockDbsv2.dbo.rpcppe')
+                    ->table('dbo.rpcppe')
                     ->where('item_id', $itemId)
                     ->update([
                         'article_id'    => $articleId,
@@ -255,6 +543,124 @@ class RPCPPEController extends Controller
         } catch (\Throwable $e) {
             DB::connection('sqlsrv')->rollBack();
 
+            return response()->json([
+                'status'  => 'error',
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Update only the remarks of a single rpcppe row (by its ID).
+     * Independent of the article lookup, so remarks can be set or cleared freely.
+     */
+    public function updateRemarks(Request $request)
+    {
+        $validated = $request->validate([
+            'id'      => 'required|integer',
+            'remarks' => 'nullable|string',
+        ]);
+
+        try {
+            $remarks = trim((string) ($validated['remarks'] ?? ''));
+
+            $affected = DB::connection('sqlsrv')
+                ->table('dbo.rpcppe')
+                ->where('ID', $validated['id'])
+                ->update([
+                    'remarks'    => $remarks !== '' ? $remarks : null,
+                    'updated_at' => now(),
+                ]);
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Remarks updated successfully.',
+                'updated' => $affected,
+            ], 200);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Re-pull the current stock balance from the live source inventory for the
+     * given rpcppe rows (Balance per Card goes stale as stock moves):
+     *   World 2 → tbl_mr_Maininventory.qty
+     *   World 1 → latest running balance (vw_gen_runningbalance), else origqty
+     * The amount is recomputed as qty × unit cost. Manual rows (item_id 0) skip.
+     */
+    public function refreshBalances(Request $request)
+    {
+        $validated = $request->validate([
+            'ids'   => 'required|array|min:1',
+            'ids.*' => 'integer',
+        ]);
+
+        try {
+            $conn = DB::connection('sqlsrv');
+
+            $rows = $conn->table('dbo.rpcppe')
+                ->whereIn('ID', $validated['ids'])
+                ->get(['ID', 'item_id', 'source_world', 'u_cost', 'qty']);
+
+            $updated   = [];
+            $unchanged = 0;
+
+            foreach ($rows as $r) {
+                $itemId = (int) $r->item_id;
+                if ($itemId <= 0) continue; // manual entry — no source to refresh from
+
+                $world = $r->source_world ?: 'W2';
+                $qty   = null;
+
+                if ($world === 'W1') {
+                    $qty = $conn->table('dbo.vw_gen_runningbalance')
+                        ->where('stockid', $itemId)
+                        ->orderByDesc('seqno')
+                        ->value('balance');
+
+                    if ($qty === null) {
+                        $qty = $conn->table('dbo.trans_gen_inventory')
+                            ->where('gid', $itemId)
+                            ->value('origqty');
+                    }
+                } else {
+                    $qty = $conn->table('dbo.tbl_mr_Maininventory')
+                        ->where('ID', $itemId)
+                        ->value('qty');
+                }
+
+                if ($qty === null) continue; // source row gone — leave as-is
+
+                $qty = (float) $qty;
+
+                // Only touch the row if the masterlist balance actually changed;
+                // otherwise leave the physical-count item exactly as it is.
+                if (abs($qty - (float) $r->qty) < 0.0001) {
+                    $unchanged++;
+                    continue;
+                }
+
+                $amt = $qty * (float) $r->u_cost;
+
+                $conn->table('dbo.rpcppe')
+                    ->where('ID', $r->ID)
+                    ->update(['qty' => $qty, 'amt' => $amt, 'updated_at' => now()]);
+
+                $updated[(int) $r->ID] = ['qty' => $qty, 'amt' => $amt];
+            }
+
+            return response()->json([
+                'status'    => 'success',
+                'message'   => count($updated) . ' balance(s) changed, ' . $unchanged . ' unchanged.',
+                'updated'   => $updated,
+                'count'     => count($updated),
+                'unchanged' => $unchanged,
+            ], 200);
+        } catch (\Throwable $e) {
             return response()->json([
                 'status'  => 'error',
                 'message' => $e->getMessage(),
@@ -304,17 +710,87 @@ class RPCPPEController extends Controller
         }
     }
 
-    public function categories(Request $request)
+    /**
+     * All persons in the office (full employee roster), used to label the RPCPPE
+     * report with an accountable person. Unlike accountableOfficers(), this is not
+     * limited to people who already have ICS/PAR issuances.
+     */
+    public function officePersonnel()
     {
         try {
             $data = DB::connection('sqlsrv')->select("
-                SELECT *
-                FROM [EstockDbsv2].[dbo].[tbl_mrcategory]
+                SELECT DISTINCT
+                    LTRIM(RTRIM(e.dtrno)) as emp_no,
+                    e.fullname
+                FROM dbo.vw_employeelist e
+                WHERE e.fullname IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(e.fullname, ''))) <> ''
+                  AND e.dtrno IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(e.dtrno, ''))) <> ''
+                ORDER BY e.fullname ASC
             ");
+
+            return response()->json($data, 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    public function categories(Request $request)
+    {
+        try {
+            $conn = DB::connection('sqlsrv');
+            $out  = [];
+
+            // Match the picker's classification: 'rpci' shows the consumable
+            // categories; anything else shows the PPE-eligible (property) ones.
+            $classification = strtolower(trim((string) $request->input('classification', '')));
+            $rpciMode  = $classification === 'rpci';
+            $allowed   = $rpciMode ? $this->rpciCategoryCodes() : null;
+            $excluded  = $rpciMode ? null : $this->excludedCategoryCodes();
+
+            $keep = function (string $world, int $code) use ($rpciMode, $allowed, $excluded): bool {
+                return $rpciMode
+                    ? in_array($code, $allowed[$world], true)
+                    : !in_array($code, $excluded[$world], true);
+            };
+
+            // World 2 — tbl_mrcategory
+            foreach ($conn->table('dbo.tbl_mrcategory')->get() as $c) {
+                $name = trim((string) ($c->Category_Name ?? ''));
+                if ($name === '' || empty($c->Category_ID)) continue;
+                if (!$keep('W2', (int) $c->Category_ID)) continue;
+                $out[] = [
+                    'value' => 'W2:' . (int) $c->Category_ID,
+                    'title' => $name,
+                    'world' => 'W2',
+                ];
+            }
+
+            // World 1 — ref_commoditycategory. NOTE: trans_gen_inventory.typeofcomid
+            // stores the category *code* (categ_code, e.g. 10402030), NOT the comcategid
+            // PK. So the filter identifier must be categ_code to match the stock rows
+            // (and the W1 row's resolved category_id, which is typeofcomid = categ_code).
+            foreach ($conn->table('dbo.ref_commoditycategory')
+                ->where(function ($q) { $q->whereNull('categ_void')->orWhere('categ_void', 0); })
+                ->get() as $c) {
+                $name = trim((string) ($c->categ_name ?? ''));
+                $code = (int) ($c->categ_code ?? 0);
+                if ($name === '' || $code === 0) continue;
+                if (!$keep('W1', $code)) continue;
+                $out[] = [
+                    'value' => 'W1:' . $code,
+                    'title' => $name,
+                    'world' => 'W1',
+                ];
+            }
 
             return response()->json([
                 'status' => 'success',
-                'data'   => $data,
+                'data'   => $out,
             ], 200);
         } catch (\Exception $e) {
             return response()->json([
@@ -328,8 +804,8 @@ class RPCPPEController extends Controller
     {
         try {
             $data = DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.articles as a')
-                ->leftJoin('EstockDbsv2.dbo.ppe_types as pt', 'pt.id', '=', 'a.ppe_type_id')
+                ->table('dbo.articles as a')
+                ->leftJoin('dbo.ppe_types as pt', 'pt.id', '=', 'a.ppe_type_id')
                 ->select(
                     'a.id',
                     'a.article_name',
@@ -360,7 +836,7 @@ class RPCPPEController extends Controller
             ]);
 
             $id = DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.articles')
+                ->table('dbo.articles')
                 ->insertGetId([
                     'article_name' => $request->article_name,
                     'ppe_type_id'  => $request->ppe_type_id,
@@ -397,7 +873,7 @@ class RPCPPEController extends Controller
             ]);
 
             DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.articles')
+                ->table('dbo.articles')
                 ->where('id', $id)
                 ->update([
                     'article_name' => $request->article_name,
@@ -427,7 +903,7 @@ class RPCPPEController extends Controller
     {
         try {
             DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.articles')
+                ->table('dbo.articles')
                 ->where('id', $id)
                 ->delete();
 
@@ -447,7 +923,7 @@ class RPCPPEController extends Controller
     {
         try {
             $data = DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.ppe_types')
+                ->table('dbo.ppe_types')
                 ->select(
                     'id',
                     'ppe_name',
@@ -475,7 +951,7 @@ class RPCPPEController extends Controller
             ]);
 
             $id = DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.ppe_types')
+                ->table('dbo.ppe_types')
                 ->insertGetId([
                     'ppe_name'   => $request->ppe_name,
                     'is_active'  => 1,
@@ -510,7 +986,7 @@ class RPCPPEController extends Controller
             ]);
 
             DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.ppe_types')
+                ->table('dbo.ppe_types')
                 ->where('id', $id)
                 ->update([
                     'ppe_name'   => $request->ppe_name,
@@ -539,7 +1015,7 @@ class RPCPPEController extends Controller
     {
         try {
             $articleCount = DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.articles')
+                ->table('dbo.articles')
                 ->where('ppe_type_id', $id)
                 ->count();
 
@@ -551,7 +1027,7 @@ class RPCPPEController extends Controller
             }
 
             DB::connection('sqlsrv')
-                ->table('EstockDbsv2.dbo.ppe_types')
+                ->table('dbo.ppe_types')
                 ->where('id', $id)
                 ->delete();
 
@@ -567,16 +1043,292 @@ class RPCPPEController extends Controller
         }
     }
 
+    /**
+     * Ensure every live category (both worlds) has a classification row. New
+     * categories are seeded with a sensible default: World 1 categ_code starting
+     * '104' = inventory (RPCI), '106' = PPE; World 2 defaults to PPE (property).
+     * Idempotent and cheap — the category tables are tiny (~tens of rows).
+     */
+    private function ensureCategoryClassifications(): void
+    {
+        $conn = DB::connection('sqlsrv');
+        $tbl  = 'dbo.category_classifications';
+
+        $have = [];
+        foreach ($conn->table($tbl)->get(['world', 'category_code']) as $r) {
+            $have[$r->world . ':' . $r->category_code] = true;
+        }
+
+        $rows = [];
+
+        // World 1 — ref_commoditycategory (keyed by categ_code).
+        foreach ($conn->table('dbo.ref_commoditycategory')
+            ->where(function ($q) { $q->whereNull('categ_void')->orWhere('categ_void', 0); })
+            ->get() as $c) {
+            $code = (int) ($c->categ_code ?? 0);
+            $name = trim((string) ($c->categ_name ?? ''));
+            if ($code === 0 || $name === '' || isset($have['W1:' . $code])) continue;
+            $rows[] = [
+                'world'         => 'W1',
+                'category_code' => (string) $code,
+                'category_name' => $name,
+                'report_type'   => str_starts_with((string) $code, '104') ? 'RPCI' : 'PPE',
+                'is_active'     => 1,
+                'created_at'    => now(),
+                'updated_at'    => now(),
+            ];
+        }
+
+        // World 2 — tbl_mrcategory (keyed by Category_ID). Default PPE (property).
+        foreach ($conn->table('dbo.tbl_mrcategory')->get() as $c) {
+            $id   = (int) ($c->Category_ID ?? 0);
+            $name = trim((string) ($c->Category_Name ?? ''));
+            if ($id === 0 || $name === '' || isset($have['W2:' . $id])) continue;
+            $rows[] = [
+                'world'         => 'W2',
+                'category_code' => (string) $id,
+                'category_name' => $name,
+                'report_type'   => 'PPE',
+                'is_active'     => 1,
+                'created_at'    => now(),
+                'updated_at'    => now(),
+            ];
+        }
+
+        if (!empty($rows)) {
+            $conn->table($tbl)->insert($rows);
+        }
+    }
+
+    /**
+     * Category codes (per world) that are classified as RPCI (inventory) or
+     * inactive — these must be excluded from the RPCPPE/RPCSP masterlist/picker.
+     */
+    private function excludedCategoryCodes(): array
+    {
+        $this->ensureCategoryClassifications();
+
+        $out = ['W1' => [], 'W2' => []];
+        foreach (DB::connection('sqlsrv')
+            ->table('dbo.category_classifications')
+            ->where(function ($q) { $q->where('report_type', 'RPCI')->orWhere('is_active', 0); })
+            ->get(['world', 'category_code']) as $r) {
+            if (isset($out[$r->world])) $out[$r->world][] = (int) $r->category_code;
+        }
+        return $out;
+    }
+
+    /**
+     * Category codes (per world) that ARE eligible for RPCPPE/RPCSP — i.e. classified
+     * PPE and active. The masterlist is a whitelist: only items whose category is in
+     * this set appear; anything not PPE-eligible (RPCI, inactive, or unclassified) is
+     * hidden.
+     */
+    private function ppeEligibleCategoryCodes(): array
+    {
+        $this->ensureCategoryClassifications();
+
+        $out = ['W1' => [], 'W2' => []];
+        foreach (DB::connection('sqlsrv')
+            ->table('dbo.category_classifications')
+            ->where('report_type', 'PPE')
+            ->where('is_active', 1)
+            ->get(['world', 'category_code']) as $r) {
+            if (isset($out[$r->world])) $out[$r->world][] = (int) $r->category_code;
+        }
+        return $out;
+    }
+
+    /**
+     * Category codes (per world) classified as RPCI (inventory/consumable) and
+     * active. Used when the picker is counting RPCI items specifically.
+     */
+    private function rpciCategoryCodes(): array
+    {
+        $this->ensureCategoryClassifications();
+
+        $out = ['W1' => [], 'W2' => []];
+        foreach (DB::connection('sqlsrv')
+            ->table('dbo.category_classifications')
+            ->where('report_type', 'RPCI')
+            ->where('is_active', 1)
+            ->get(['world', 'category_code']) as $r) {
+            if (isset($out[$r->world])) $out[$r->world][] = (int) $r->category_code;
+        }
+        return $out;
+    }
+
+    /**
+     * List every category with its RPCI/PPE classification (for the References UI).
+     */
+    public function categoryClassifications()
+    {
+        try {
+            $this->ensureCategoryClassifications();
+
+            $data = DB::connection('sqlsrv')
+                ->table('dbo.category_classifications')
+                ->select('id', 'world', 'category_code', 'category_name', 'report_type', 'is_active')
+                ->orderBy('world')
+                ->orderBy('category_name')
+                ->get();
+
+            return response()->json(['status' => 'success', 'data' => $data], 200);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Update a category's classification (RPCI vs PPE) and/or active flag.
+     */
+    public function updateCategoryClassification(Request $request, $id)
+    {
+        try {
+            $validated = $request->validate([
+                'report_type' => 'nullable|in:PPE,RPCI',
+                'is_active'   => 'nullable|boolean',
+            ]);
+
+            $update = ['updated_at' => now()];
+            if (array_key_exists('report_type', $validated) && $validated['report_type'] !== null) {
+                $update['report_type'] = $validated['report_type'];
+            }
+            if (array_key_exists('is_active', $validated) && $validated['is_active'] !== null) {
+                $update['is_active'] = $validated['is_active'] ? 1 : 0;
+            }
+
+            DB::connection('sqlsrv')
+                ->table('dbo.category_classifications')
+                ->where('id', $id)
+                ->update($update);
+
+            return response()->json(['success' => true, 'message' => 'Classification updated.'], 200);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json(['status' => 'error', 'message' => 'Validation failed.', 'errors' => $e->errors()], 422);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Resolve the PPE capitalization threshold: prefer the runtime value stored
+     * in app_settings, falling back to the config/env default. COA has changed
+     * this before, so it is configurable rather than hardcoded.
+     */
+    private function capitalizationThreshold(): float
+    {
+        $configDefault = (float) config('rpcppe.capitalization_threshold', 50000);
+
+        try {
+            $value = DB::connection('sqlsrv')
+                ->table('dbo.app_settings')
+                ->where('key', 'rpcppe_capitalization_threshold')
+                ->value('value');
+
+            return ($value !== null && is_numeric($value)) ? (float) $value : $configDefault;
+        } catch (\Throwable $e) {
+            // Table may not exist yet; fall back to the config default.
+            return $configDefault;
+        }
+    }
+
+    public function getSettings()
+    {
+        try {
+            return response()->json([
+                'status' => 'success',
+                'data'   => [
+                    'capitalization_threshold' => $this->capitalizationThreshold(),
+                ],
+            ], 200);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    public function updateSettings(Request $request)
+    {
+        $validated = $request->validate([
+            'capitalization_threshold' => 'required|numeric|min:0',
+        ]);
+
+        try {
+            $threshold = (string) $validated['capitalization_threshold'];
+
+            $exists = DB::connection('sqlsrv')
+                ->table('dbo.app_settings')
+                ->where('key', 'rpcppe_capitalization_threshold')
+                ->exists();
+
+            if ($exists) {
+                DB::connection('sqlsrv')
+                    ->table('dbo.app_settings')
+                    ->where('key', 'rpcppe_capitalization_threshold')
+                    ->update([
+                        'value'      => $threshold,
+                        'updated_at' => now(),
+                    ]);
+            } else {
+                DB::connection('sqlsrv')
+                    ->table('dbo.app_settings')
+                    ->insert([
+                        'key'         => 'rpcppe_capitalization_threshold',
+                        'value'       => $threshold,
+                        'description' => 'PPE capitalization threshold (PHP). Items at or above this unit cost are PPE; below are semi-expendable.',
+                        'created_at'  => now(),
+                        'updated_at'  => now(),
+                    ]);
+            }
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Capitalization threshold updated successfully.',
+                'data'    => [
+                    'capitalization_threshold' => (float) $threshold,
+                ],
+            ], 200);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
     private function validateReportRequest(Request $request): array
     {
         return $request->validate([
             'item_status' => 'required|in:issued,unissued,all',
             'property_type_id' => 'nullable|integer',
             'accountable_officer' => 'nullable|string',
+            'accountable_person' => 'required|string',
             'form_type' => 'nullable|string',
             'as_of_date' => 'nullable|date',
             'export_format' => 'nullable|in:pdf,excel',
+            'ids' => 'nullable|array',
+            'ids.*' => 'integer',
+            'certified_name' => 'nullable|string',
+            'approved_name' => 'nullable|string',
+            'verified_name' => 'nullable|string',
         ]);
+    }
+
+    /**
+     * Report signatory blocks (Certified / Approved / Verified) entered on the
+     * Generate page. Each carries the printed name; the fixed COA role caption
+     * is rendered by the view.
+     */
+    private function reportSignatories(Request $request): array
+    {
+        return [
+            'certified' => ['name' => trim((string) $request->input('certified_name', ''))],
+            'approved'  => ['name' => trim((string) $request->input('approved_name', ''))],
+            'verified'  => ['name' => trim((string) $request->input('verified_name', ''))],
+        ];
     }
 
     private function buildReportQuery(Request $request)
@@ -588,9 +1340,9 @@ class RPCPPEController extends Controller
         $asOfDate = $request->input('as_of_date');
 
         $query = DB::connection('sqlsrv')
-            ->table('EstockDbsv2.dbo.rpcppe as r')
-            ->leftJoin('EstockDbsv2.dbo.articles as a', 'a.id', '=', 'r.article_id')
-            ->leftJoin('EstockDbsv2.dbo.ppe_types as pt', 'pt.id', '=', 'a.ppe_type_id')
+            ->table('dbo.rpcppe as r')
+            ->leftJoin('dbo.articles as a', 'a.id', '=', 'r.article_id')
+            ->leftJoin('dbo.ppe_types as pt', 'pt.id', '=', 'a.ppe_type_id')
             ->select(
                 'r.ID',
                 'r.item_id',
@@ -616,6 +1368,20 @@ class RPCPPEController extends Controller
                 'pt.ppe_name'
             );
 
+        // When specific item IDs are supplied (generate from selected items),
+        // return exactly those rows and skip the status/type/threshold filters.
+        $selectedIds = $request->input('ids', []);
+
+        if (is_array($selectedIds) && count($selectedIds)) {
+            $query->whereIn('r.ID', array_map('intval', $selectedIds));
+
+            return $query
+                ->orderBy('a.article_name')
+                ->orderBy('r.com_desc');
+        }
+
+        // Issued To / custody filter (who holds the item). This is independent of
+        // PPE-vs-semi classification, which is driven by unit value vs threshold below.
         if ($itemStatus === 'issued') {
             $query->whereNotNull('r.issuance_id')
                 ->where('r.issuance_id', '>', 0);
@@ -643,10 +1409,44 @@ class RPCPPEController extends Controller
                 ->whereDate('r.date_acquired', '<=', $asOfDate);
         }
 
-        if ($formType === 'Semi-Expendable Property') {
-            $query->where('r.u_cost', '<', 50000);
-        } elseif ($formType === 'Expendable Property') {
-            $query->where('r.u_cost', '>=', 50000);
+        $capitalizationThreshold = $this->capitalizationThreshold();
+        $rpciCodes = $this->rpciCategoryCodes();
+
+        // Keep only rows whose (world, category) is in the per-world set.
+        $inCategorySet = function ($q, array $set) {
+            $q->where(function ($w) use ($set) {
+                $w->whereRaw('1 = 0');
+                if (!empty($set['W1'])) {
+                    $w->orWhere(fn ($x) => $x->where('r.source_world', 'W1')->whereIn('r.category_id', $set['W1']));
+                }
+                if (!empty($set['W2'])) {
+                    $w->orWhere(fn ($x) => $x->where('r.source_world', 'W2')->whereIn('r.category_id', $set['W2']));
+                }
+            });
+        };
+
+        // Drop rows whose (world, category) is in the per-world set (used to keep
+        // RPCI consumables out of the PPE / Semi-Expendable property reports).
+        $notInCategorySet = function ($q, array $set) {
+            if (!empty($set['W1'])) {
+                $q->where(fn ($x) => $x->where('r.source_world', '!=', 'W1')->orWhereNotIn('r.category_id', $set['W1']));
+            }
+            if (!empty($set['W2'])) {
+                $q->where(fn ($x) => $x->where('r.source_world', '!=', 'W2')->orWhereNotIn('r.category_id', $set['W2']));
+            }
+        };
+
+        if ($formType === 'RPCI') {
+            // Inventories report: only consumable (RPCI) categories, any unit cost.
+            $inCategorySet($query, $rpciCodes);
+        } elseif ($formType === 'PPE') {
+            // PPE report: property items at or above the capitalization threshold.
+            $notInCategorySet($query, $rpciCodes);
+            $query->where('r.u_cost', '>=', $capitalizationThreshold);
+        } else {
+            // Semi-Expendable: property items below the threshold (RPCI excluded).
+            $notInCategorySet($query, $rpciCodes);
+            $query->where('r.u_cost', '<', $capitalizationThreshold);
         }
 
         return $query
@@ -663,7 +1463,7 @@ class RPCPPEController extends Controller
         }
 
         $officer = DB::connection('sqlsrv')
-            ->table('EstockDbsv2.dbo.vw_employeelist as e')
+            ->table('dbo.vw_employeelist as e')
             ->select([
                 DB::raw('e.fullname as name'),
                 DB::raw("
@@ -744,7 +1544,7 @@ class RPCPPEController extends Controller
         }
 
         $ppeName = DB::connection('sqlsrv')
-            ->table('EstockDbsv2.dbo.ppe_types')
+            ->table('dbo.ppe_types')
             ->where('id', $propertyTypeId)
             ->value('ppe_name');
 
@@ -762,19 +1562,14 @@ class RPCPPEController extends Controller
                 return (float) $item->amt;
             });
 
-            $accountableOfficer = null;
-
-            if (($validated['item_status'] ?? '') === 'issued' && !empty($validated['accountable_officer'])) {
-                $accountableOfficer = $this->getAccountableOfficerDetails($validated['accountable_officer']);
-            }
+            // A selected accountable person labels the whole report (no filtering);
+            // with none selected, fall back to grouping items by accountable officer.
+            $accountableOfficer = $this->getAccountableOfficerDetails($validated['accountable_person'] ?? null);
 
             $groupedItems = [];
             $shouldGroupByOfficer = false;
 
-            if (
-                (($validated['item_status'] ?? '') === 'issued' || ($validated['item_status'] ?? '') === 'all')
-                && empty($validated['accountable_officer'])
-            ) {
+            if ($accountableOfficer === null) {
                 $groupedItems = $this->groupItemsByAccountableOfficer($items);
                 $shouldGroupByOfficer = true;
             }
@@ -785,10 +1580,12 @@ class RPCPPEController extends Controller
                 'shouldGroupByOfficer' => $shouldGroupByOfficer,
                 'total' => $total,
                 'accountableOfficer' => $accountableOfficer,
+                'signatories' => $this->reportSignatories($request),
                 'filters' => [
                     'item_status' => $validated['item_status'] ?? null,
                     'property_type_id' => $validated['property_type_id'] ?? null,
                     'accountable_officer' => $validated['accountable_officer'] ?? null,
+                    'accountable_person' => $validated['accountable_person'] ?? null,
                     'form_type' => $validated['form_type'] ?? null,
                     'as_of_date' => $validated['as_of_date'] ?? null,
                     'ppe_name' => $this->resolvePpeName(
@@ -820,19 +1617,14 @@ class RPCPPEController extends Controller
                 return (float) $item->amt;
             });
 
-            $accountableOfficer = null;
-
-            if (($validated['item_status'] ?? '') === 'issued' && !empty($validated['accountable_officer'])) {
-                $accountableOfficer = $this->getAccountableOfficerDetails($validated['accountable_officer']);
-            }
+            // A selected accountable person labels the whole report (no filtering);
+            // with none selected, fall back to grouping items by accountable officer.
+            $accountableOfficer = $this->getAccountableOfficerDetails($validated['accountable_person'] ?? null);
 
             $groupedItems = [];
             $shouldGroupByOfficer = false;
 
-            if (
-                (($validated['item_status'] ?? '') === 'issued' || ($validated['item_status'] ?? '') === 'all')
-                && empty($validated['accountable_officer'])
-            ) {
+            if ($accountableOfficer === null) {
                 $groupedItems = $this->groupItemsByAccountableOfficer($items);
                 $shouldGroupByOfficer = true;
             }
@@ -843,10 +1635,12 @@ class RPCPPEController extends Controller
                 'shouldGroupByOfficer' => $shouldGroupByOfficer,
                 'total' => $total,
                 'accountableOfficer' => $accountableOfficer,
+                'signatories' => $this->reportSignatories($request),
                 'filters' => [
                     'item_status' => $validated['item_status'] ?? null,
                     'property_type_id' => $validated['property_type_id'] ?? null,
                     'accountable_officer' => $validated['accountable_officer'] ?? null,
+                    'accountable_person' => $validated['accountable_person'] ?? null,
                     'form_type' => $validated['form_type'] ?? null,
                     'as_of_date' => $validated['as_of_date'] ?? null,
                     'ppe_name' => $this->resolvePpeName(
@@ -874,6 +1668,9 @@ class RPCPPEController extends Controller
 
             $items = $this->buildReportQuery($request)->get();
 
+            $accountablePerson = $this->getAccountableOfficerDetails($request->input('accountable_person'));
+            $accountablePersonName = $accountablePerson['name'] ?? '';
+
             $filename = 'rpcppe-report-' . now()->format('Ymd-His') . '.csv';
 
             $headers = [
@@ -881,16 +1678,19 @@ class RPCPPEController extends Controller
                 'Content-Disposition' => 'attachment; filename="' . $filename . '"',
             ];
 
-            return response()->stream(function () use ($items, $request) {
+            return response()->stream(function () use ($items, $request, $accountablePersonName) {
                 $handle = fopen('php://output', 'w');
 
                 fprintf($handle, chr(0xEF) . chr(0xBB) . chr(0xBF));
 
-                fputcsv($handle, ['REPORT ON THE PHYSICAL COUNT OF PROPERTY, PLANT AND EQUIPMENT']);
+                $reportTitle = $request->input('form_type') === 'PPE'
+                    ? 'REPORT ON THE PHYSICAL COUNT OF PROPERTY, PLANT AND EQUIPMENT'
+                    : 'REPORT ON THE PHYSICAL COUNT OF SEMI-EXPENDABLE PROPERTY';
+
+                fputcsv($handle, [$reportTitle]);
                 fputcsv($handle, ['Form Type', $request->input('form_type', '')]);
-                fputcsv($handle, ['Item Status', $request->input('item_status', '')]);
                 fputcsv($handle, ['As of Date', $request->input('as_of_date', '')]);
-                fputcsv($handle, ['Accountable Officer', $request->input('accountable_officer', '')]);
+                fputcsv($handle, ['Accountable Person', $accountablePersonName]);
                 fputcsv($handle, []);
 
                 fputcsv($handle, [

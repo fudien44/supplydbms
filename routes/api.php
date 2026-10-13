@@ -16,7 +16,11 @@ Route::get('/user', function (Request $request) {
 })->middleware('auth:sanctum');
 Route::get('/item-master-list', [RPCPPEController::class, 'masterlist']);
 Route::get('/acc-officer', [RPCPPEController::class, 'accountableOfficers']);
+Route::get('/office-personnel', [RPCPPEController::class, 'officePersonnel']);
 Route::get('/categories', [RPCPPEController::class, 'categories']);
+
+Route::get('/category-classifications', [RPCPPEController::class, 'categoryClassifications']);
+Route::put('/category-classifications/{id}', [RPCPPEController::class, 'updateCategoryClassification']);
 
 Route::get('/ppe-types', [RPCPPEController::class, 'getPpeTypes']);
 Route::post('/ppe-types', [RPCPPEController::class, 'storePpeType']);
@@ -32,6 +36,11 @@ Route::get('/rpcppe', [RPCPPEController::class, 'getItems']);
 Route::post('/rpcppe/store', [RPCPPEController::class, 'storeItems']);
 Route::post('/rpcppe/delete', [RPCPPEController::class, 'deleteItems']);
 Route::post('/rpcppe/update', [RPCPPEController::class, 'updateItems']);
+Route::post('/rpcppe/remarks', [RPCPPEController::class, 'updateRemarks']);
+Route::post('/rpcppe/refresh-balance', [RPCPPEController::class, 'refreshBalances']);
+
+Route::get('/rpcppe/settings', [RPCPPEController::class, 'getSettings']);
+Route::put('/rpcppe/settings', [RPCPPEController::class, 'updateSettings']);
 
 Route::post('/rpcppe/preview', [RPCPPEController::class, 'previewReport']);
 Route::post('/rpcppe/export-pdf', [RPCPPEController::class, 'exportPdf']);
