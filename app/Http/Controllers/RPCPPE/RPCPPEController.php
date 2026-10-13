@@ -149,10 +149,10 @@ class RPCPPEController extends Controller
                 ->get();
 
             // Resolve com_desc for just this page, per world.
-            $w2ComIds = []; $w1ComIds = []; $w2Ids = [];
+            $w2ComIds = []; $w1ComIds = []; $w2Ids = []; $w1Ids = [];
             foreach ($pageRows as $r) {
                 if ($r->world === 'W2') { $w2ComIds[] = (int) $r->commodity_id; $w2Ids[] = (int) $r->item_id; }
-                else { $w1ComIds[] = (int) $r->commodity_id; }
+                else { $w1ComIds[] = (int) $r->commodity_id; $w1Ids[] = (int) $r->item_id; }
             }
 
             $w2Desc = [];
@@ -200,7 +200,37 @@ class RPCPPEController extends Controller
                 ", $w2Ids) as $r) { $parMap[(int) $r->inventory_ID] = $r; }
             }
 
-            $data = collect($pageRows)->map(function ($r) use ($w2Desc, $w1Desc, $icsMap, $parMap) {
+            // Balance per card = REMAINING stock, not the original received qty.
+            //   World 2: qty − issued(ICS+PAR) + returns
+            //   World 1: latest running balance (vw_gen_runningbalance), else origqty
+            $w2Issued = []; $w2Returned = []; $w1Balance = [];
+            if (count($w2Ids)) {
+                $ph = implode(',', array_fill(0, count($w2Ids), '?'));
+                foreach ($conn->select("
+                    SELECT inventory_ID, SUM(qty) AS q FROM dbo.tbl_mricslist
+                    WHERE inventory_ID IN ($ph) AND (void IS NULL OR void = 0) GROUP BY inventory_ID
+                ", $w2Ids) as $r) { $w2Issued[(int) $r->inventory_ID] = (float) $r->q; }
+                foreach ($conn->select("
+                    SELECT inventory_ID, SUM(qty) AS q FROM dbo.tbl_mrparlist
+                    WHERE inventory_ID IN ($ph) AND (void IS NULL OR void = 0) GROUP BY inventory_ID
+                ", $w2Ids) as $r) { $w2Issued[(int) $r->inventory_ID] = ($w2Issued[(int) $r->inventory_ID] ?? 0) + (float) $r->q; }
+                foreach ($conn->select("
+                    SELECT rl.inventory_ID, SUM(rl.qty) AS q
+                    FROM dbo.tbl_mr_returnlist rl INNER JOIN dbo.tbl_mr_return r ON rl.return_ID = r.return_ID
+                    WHERE rl.inventory_ID IN ($ph) AND (r.void IS NULL OR r.void = 0) GROUP BY rl.inventory_ID
+                ", $w2Ids) as $r) { $w2Returned[(int) $r->inventory_ID] = (float) $r->q; }
+            }
+            if (count($w1Ids)) {
+                $ph = implode(',', array_fill(0, count($w1Ids), '?'));
+                foreach ($conn->select("
+                    SELECT stockid, balance FROM (
+                        SELECT stockid, balance, ROW_NUMBER() OVER (PARTITION BY stockid ORDER BY seqno DESC) AS rn
+                        FROM dbo.vw_gen_runningbalance WHERE stockid IN ($ph)
+                    ) x WHERE x.rn = 1
+                ", $w1Ids) as $r) { $w1Balance[(int) $r->stockid] = (float) $r->balance; }
+            }
+
+            $data = collect($pageRows)->map(function ($r) use ($w2Desc, $w1Desc, $icsMap, $parMap, $w2Issued, $w2Returned, $w1Balance) {
                 $r->com_desc     = $r->world === 'W2'
                     ? ($w2Desc[(int) $r->commodity_id] ?? '')
                     : ($w1Desc[(int) $r->commodity_id] ?? '');
@@ -208,6 +238,15 @@ class RPCPPEController extends Controller
                 $r->category_ID  = $r->category_id;
                 $r->remarks      = '';
                 $r->source       = $r->world === 'W2' ? 'Office' : 'General';
+
+                // Replace the original qty with the true remaining balance.
+                if ($r->world === 'W2') {
+                    $r->qty = (float) $r->qty
+                        - ($w2Issued[(int) $r->item_id] ?? 0)
+                        + ($w2Returned[(int) $r->item_id] ?? 0);
+                } else {
+                    $r->qty = $w1Balance[(int) $r->item_id] ?? (float) $r->qty;
+                }
 
                 $iss = $r->world === 'W2' ? ($icsMap[(int) $r->item_id] ?? $parMap[(int) $r->item_id] ?? null) : null;
                 $r->emp_no        = $iss->emp_no ?? '';
@@ -586,9 +625,9 @@ class RPCPPEController extends Controller
     }
 
     /**
-     * Re-pull the current stock balance from the live source inventory for the
+     * Re-pull the current REMAINING balance from the live source inventory for the
      * given rpcppe rows (Balance per Card goes stale as stock moves):
-     *   World 2 → tbl_mr_Maininventory.qty
+     *   World 2 → tbl_mr_Maininventory.qty − issued(ICS+PAR) + returns
      *   World 1 → latest running balance (vw_gen_runningbalance), else origqty
      * The amount is recomputed as qty × unit cost. Manual rows (item_id 0) skip.
      */
@@ -628,9 +667,27 @@ class RPCPPEController extends Controller
                             ->value('origqty');
                     }
                 } else {
-                    $qty = $conn->table('dbo.tbl_mr_Maininventory')
+                    $orig = $conn->table('dbo.tbl_mr_Maininventory')
                         ->where('ID', $itemId)
                         ->value('qty');
+
+                    if ($orig !== null) {
+                        $ics = (float) $conn->table('dbo.tbl_mricslist')
+                            ->where('inventory_ID', $itemId)
+                            ->where(function ($q) { $q->whereNull('void')->orWhere('void', 0); })
+                            ->sum('qty');
+                        $par = (float) $conn->table('dbo.tbl_mrparlist')
+                            ->where('inventory_ID', $itemId)
+                            ->where(function ($q) { $q->whereNull('void')->orWhere('void', 0); })
+                            ->sum('qty');
+                        $ret = (float) $conn->table('dbo.tbl_mr_returnlist as rl')
+                            ->join('dbo.tbl_mr_return as r', 'rl.return_ID', '=', 'r.return_ID')
+                            ->where('rl.inventory_ID', $itemId)
+                            ->where(function ($q) { $q->whereNull('r.void')->orWhere('r.void', 0); })
+                            ->sum('rl.qty');
+
+                        $qty = (float) $orig - $ics - $par + $ret;
+                    }
                 }
 
                 if ($qty === null) continue; // source row gone — leave as-is
