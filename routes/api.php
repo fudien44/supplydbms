@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\loginController;
+use App\Http\Controllers\MosIcsController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
@@ -48,6 +49,7 @@ Route::group(['prefix' => 'itr'], function () {
     Route::get('/{id}/attachments/{attachmentId}/download', [MosItrController::class, 'downloadAttachment']);
     Route::get('/{id}', [MosItrController::class, 'showItr']); // ← keep /{id} catch-all LAST
     Route::delete('delete/{id}', [MosItrController::class, 'destroy']);
+    Route::delete('/{id}/attachments/{attachmentId}', [MosItrController::class, 'deleteAttachment']);
 });
 
 Route::post('/login', [loginController::class, 'login'])->name('login');
@@ -77,5 +79,23 @@ Route::group(['prefix' => 'mr-inventory-records'], function () {
     Route::get('/{inventoryId}/issued', [MRInventoryRecordsController::class, 'recordList']);
     Route::delete('/{id}', [MRInventoryRecordsController::class, 'destroy']);
     Route::get('/mr-inventory-records-export', [MRInventoryRecordsController::class, 'export']);
+});
+
+Route::group(['prefix' => 'ics'], function () {
+    Route::get('/index', [MosIcsController::class, 'index']);
+    Route::get('/next-no', [MosIcsController::class, 'nextNo']);
+    Route::get('/listinventory', [MosIcsController::class, 'listInventory']);
+    Route::get('/list', [MosIcsController::class, 'listIcs']);
+    Route::get('/export', [MosIcsController::class, 'export']);
+    Route::post('/save', [MosIcsController::class, 'save']);
+ 
+    Route::get('/{id}/pdf', [MosIcsController::class, 'pdf']);
+    Route::get('/{id}/attachments', [MosIcsController::class, 'listAttachments']);
+    Route::post('/{id}/upload-attachment', [MosIcsController::class, 'uploadAttachment']);
+    Route::get('/{id}/attachments/{attachmentId}/download', [MosIcsController::class, 'downloadAttachment']);
+    Route::delete('/{id}/attachments/{attachmentId}', [MosIcsController::class, 'deleteAttachment']);
+ 
+    Route::get('/{id}', [MosIcsController::class, 'show']);
+    Route::delete('/{id}', [MosIcsController::class, 'destroy']);
 });
 // });

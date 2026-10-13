@@ -286,7 +286,7 @@
                         <td></td>
                         <td colspan="2"></td>
                         <td colspan="2"></td>
-                        <td colspan="3"><i>Source:</i> {{ $item->inventorydet->supplier ?? '-' }}</td>
+                        <td colspan="3"><i>Source:</i> {{ $item->source_supplier ?? '-' }}</td>
                         <td></td>
                         <td colspan="2"></td>
                         <td colspan="2"></td>

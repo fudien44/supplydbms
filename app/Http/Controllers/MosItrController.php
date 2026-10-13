@@ -9,7 +9,6 @@ use App\Models\EmployeeList;
 use App\Models\InventoryTransferReport;
 use App\Models\InventoryTransferReportItem;
 use App\Models\FacilityAgencyList;
-use App\Models\CommodityMasterList;
 use App\Models\TransGenInventory;
 use App\Models\CommodityCategory;
 use App\Models\InventoryTransferAttachment;
@@ -24,6 +23,8 @@ use Illuminate\Support\Facades\Storage;
 
 class MosItrController extends Controller
 {
+    private const MEDICAL_CATEGORY_ID = 11; // ref_commoditycategory.comcategid
+
     public function index(Request $request)
     {
         return response()->json([
@@ -56,65 +57,75 @@ class MosItrController extends Controller
         return $employees->toArray();
     }
 
+    
+private function medicalCategoryCodes()
+{
+    return DB::table('ref_commoditycategory')
+        ->select('categ_code')
+        ->where('comcategid', self::MEDICAL_CATEGORY_ID);
+}
+
+private function itrType(Request $request): string
+{
+    return $request->boolean('medical') ? 'medical' : 'office';
+}
+
     public function listInventory(Request $request)
-    {
-        $search = $request->input('search');
-        $category = $request->input('category');
+{
+    $search = $request->input('search');
 
-        $baseWhere = 'WHERE runningbalance > 0 AND ristype = 0';
-        $bindings = [];
+    $query = DB::table('vw_mrrunningbalance')
+        ->select(
+            'ID as id', 'stock_no as stockno', 'date_acquired as dateaquired',
+            'po_no as poptrno', 'ref_no as reference', 'descwithunit as itemdesc',
+            'Category_Name as categ_name', 'u_cost as unitcost', 'runningbalance as balance'
+        )
+        ->where('void', 0)
+        ->where('ristype', 0)
+        ->where('runningbalance', '>', 0)
+        ->orderByDesc('date_acquired')
+        ->orderByDesc('ID');
 
-        if (!empty($search)) {
-            $baseWhere .= ' AND (com_desc LIKE ? OR ref_no LIKE ?)';
-            $bindings[] = "%{$search}%";
-            $bindings[] = "%{$search}%";
-        }
-
-        if (!empty($category)) {
-            $baseWhere .= ' AND Category_Name = ?';
-            $bindings[] = $category;
-        }
-
-        return DB::select(
-            "
-            SELECT TOP 20
-                ID, date_acquired, ref_no, po_no,
-                com_desc, Category_Name, description, u_cost, qty
-            FROM vw_mrrunningbalance
-            {$baseWhere}
-            ORDER BY ID DESC
-        ",
-            $bindings,
-        );
+    if (!empty($search)) {
+        $query->where(function ($q) use ($search) {
+            $q->where('com_desc', 'LIKE', "%{$search}%")
+                ->orWhere('stock_no', 'LIKE', "%{$search}%")
+                ->orWhere('po_no', 'LIKE', "%{$search}%")
+                ->orWhere('ref_no', 'LIKE', "%{$search}%");
+        });
     }
 
-    public function listGenInventory(Request $request)
-    {
-        $search = $request->input('search');
-        $category = $request->input('category'); // from VSelect
+    return $query->limit(300)->get();
+}
 
-        $query = CommodityMasterList::with(['inventory', 'category'])
-            ->orderBy('comid', 'desc');
+// Medical picker: medical equipment lots only
+public function listGenInventory(Request $request)
+{
+    $search = $request->input('search');
 
-        // Text search (only on com_desc and inventory.poptrno)
-        if (!empty($search)) {
-            $query->where(function ($q) use ($search) {
-                $q->where('com_desc', 'LIKE', "%{$search}%")
-                ->orWhereHas('inventory', function ($q2) use ($search) {
-                    $q2->where('poptrno', 'LIKE', "%{$search}%");
-                });
-            });
-        }
+    $query = DB::table('vw_geninventory')
+        ->select(
+            'gid as id', 'stockno', 'dateaquired', 'poptrno', 'reference',
+            'itemdesc', 'categ_name', 'unitcost', 'balance'
+        )
+        ->where('void', 0)
+        ->whereNotNull('commodityid')
+        ->whereIn('typeofcomid', $this->medicalCategoryCodes())
+        ->orderByDesc('dateaquired')
+        ->orderByDesc('gid');
 
-        // Category filter (only if selected)
-        if (!empty($category)) {
-            $query->whereHas('category', function ($q) use ($category) {
-                $q->where('comcategid', $category);
-            });
-        }
-
-        return $query->limit(20)->get();
+    if (!empty($search)) {
+        $query->where(function ($q) use ($search) {
+            $q->where('com_desc', 'LIKE', "%{$search}%")
+                ->orWhere('itemdesc', 'LIKE', "%{$search}%")
+                ->orWhere('stockno', 'LIKE', "%{$search}%")
+                ->orWhere('poptrno', 'LIKE', "%{$search}%")
+                ->orWhere('reference', 'LIKE', "%{$search}%");
+        });
     }
+
+    return $query->limit(300)->get();
+}
 
     public function listFacilityAgency(Request $request)
     {
@@ -133,18 +144,42 @@ class MosItrController extends Controller
 
     public function save(Request $request)
     {
-        $id = $request->input('id');
+       $id = $request->input('id');
+$itrType = $this->itrType($request);
 
-        if (!$id) {
-            $exists = InventoryTransferReport::where('itr_no', $request->itr_no)->exists();
+if ($id) {
+    $existing = InventoryTransferReport::findOrFail((int) $id);
+    if ($existing->itr_type !== $itrType) {
+        return response()->json([
+            'success' => false,
+            'message' => 'This ITR belongs to the other module.'
+        ], 422);
+    }
+} elseif (InventoryTransferReport::where('itr_no', $request->itr_no)->exists()) {
+    return response()->json([
+        'success' => false,
+        'message' => "ITR No. '{$request->itr_no}' already exists."
+    ], 422);
+}
 
-            if ($exists) {
-                return response()->json([
-                    'success' => false,
-                    'message' => "ITR No. '{$request->itr_no}' already exists."
-                ], 422);
-            }
-        }
+// Medical: every item must be a medical equipment lot (gid)
+if ($itrType === 'medical') {
+    $ids = collect($request->items)->pluck('inventory_id');
+    $unique = $ids->filter()->unique()->values();
+
+    $valid = DB::table('vw_geninventory')
+        ->where('void', 0)
+        ->whereIn('gid', $unique->all())
+        ->whereIn('typeofcomid', $this->medicalCategoryCodes())
+        ->count();
+
+    if ($ids->isEmpty() || $ids->contains(null) || $valid !== $unique->count()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Only medical equipment from inventory can be added.'
+        ], 422);
+    }
+}
 
         DB::beginTransaction();
 
@@ -170,8 +205,12 @@ class MosItrController extends Controller
                 'total_amount'     => $totalAmount,
             ];
 
+            if (!$id) {
+                $data['itr_type'] = $itrType;
+            }
+
             if ($id) {
-                $report = InventoryTransferReport::findOrFail((int) $id);
+                $report = $existing;
                 $report->update($data);
                 $report->items()->delete();
             } else {
@@ -225,8 +264,9 @@ class MosItrController extends Controller
 
             $query = InventoryTransferReport::query()
                 ->with(['transferType', 'toEntity', 'employeeInfo', 'attachments'])
-                ->orderBy('date_issued', 'desc')
-                ->limit(20);
+                ->orderBy('date_issued', 'desc');
+
+            $query->where('itr_type', $this->itrType($request));
 
             if ($fromDate && $toDate) {
                 $query->whereBetween('date_issued', [$fromDate, $toDate]);
@@ -294,7 +334,6 @@ class MosItrController extends Controller
     public function generatePdf($id)
     {
         $transfer = InventoryTransferReport::with([
-            'items.inventorydet', 
             'transferType',
             'fromEntity',
             'toEntity',
@@ -302,6 +341,15 @@ class MosItrController extends Controller
             'issuedBySignatory',
             'receivedByEmployee',
         ])->findOrFail((int) $id);
+        $ids = $transfer->items->pluck('inventory_id')->filter()->unique()->values()->all();
+
+        $suppliers = $transfer->itr_type === 'medical'
+            ? DB::table('vw_geninventory')->whereIn('gid', $ids)->pluck('supplier', 'gid')
+            : DB::table('vw_mrrunningbalance')->whereIn('ID', $ids)->pluck('supplier', 'ID');
+
+        $transfer->items->each(fn ($item) =>
+            $item->setAttribute('source_supplier', $suppliers[$item->inventory_id] ?? null)
+        );
 
         $pdf = Pdf::loadView('pdf.itr', [
             'transfer' => $transfer,
@@ -313,10 +361,11 @@ class MosItrController extends Controller
     public function export(Request $request)
     {
         return Excel::download(
-            new ItrExcelExport(
+           new ItrExcelExport(
                 $request->from_date,
                 $request->to_date,
-                $request->transfer_type_id
+                $request->transfer_type_id,
+                $this->itrType($request)
             ),
             'itr_records.xlsx'
         );

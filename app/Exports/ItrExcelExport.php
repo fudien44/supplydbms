@@ -12,12 +12,16 @@ class ItrExcelExport implements FromView
     protected $to;
     protected $transferType;
 
-    public function __construct($from = null, $to = null, $transferType = null)
-    {
-        $this->from = $from;
-        $this->to = $to;
-        $this->transferType = $transferType;
-    }
+    protected $itrType;
+
+
+   public function __construct($from = null, $to = null, $transferType = null, $itrType = null)
+{
+    $this->from = $from;
+    $this->to = $to;
+    $this->transferType = $transferType;
+    $this->itrType = $itrType;
+}
 
     public function view(): View
     {
@@ -39,6 +43,10 @@ class ItrExcelExport implements FromView
 
         if ($this->transferType) {
             $query->where('transfer_type_id', $this->transferType);
+        }
+
+        if ($this->itrType) {
+            $query->where('itr_type', $this->itrType);
         }
 
         return view('excel.itrexcel', [
