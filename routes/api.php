@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\loginController;
 use App\Http\Controllers\MosIcsController;
+use App\Http\Controllers\MosParController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
@@ -98,4 +99,23 @@ Route::group(['prefix' => 'ics'], function () {
     Route::get('/{id}', [MosIcsController::class, 'show']);
     Route::delete('/{id}', [MosIcsController::class, 'destroy']);
 });
+
+Route::group(['prefix' => 'par'], function () {
+    Route::get('/index', [MosParController::class, 'index']);
+    Route::get('/next-no', [MosParController::class, 'nextNo']);
+    Route::get('/listinventory', [MosParController::class, 'listInventory']);
+    Route::get('/list', [MosParController::class, 'listPar']);
+    Route::get('/export', [MosParController::class, 'export']);
+    Route::post('/save', [MosParController::class, 'save']);
+ 
+    Route::get('/{id}/pdf', [MosParController::class, 'pdf']);
+    Route::get('/{id}/attachments', [MosParController::class, 'listAttachments']);
+    Route::post('/{id}/upload-attachment', [MosParController::class, 'uploadAttachment']);
+    Route::get('/{id}/attachments/{attachmentId}/download', [MosParController::class, 'downloadAttachment']);
+    Route::delete('/{id}/attachments/{attachmentId}', [MosParController::class, 'deleteAttachment']);
+ 
+    Route::get('/{id}', [MosParController::class, 'show']);
+    Route::delete('/{id}', [MosParController::class, 'destroy']);
+});
+ 
 // });
