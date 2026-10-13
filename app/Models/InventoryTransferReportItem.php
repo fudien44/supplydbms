@@ -12,6 +12,7 @@ class InventoryTransferReportItem extends Model
     protected $table = 'inventory_transfer_report_items';
 
     protected $fillable = [
+        'inventory_id',
         'transfer_report_id',
         'date_acquired',
         'reference',
@@ -25,7 +26,7 @@ class InventoryTransferReportItem extends Model
 
     public function inventorydet()
     {
-        return $this->belongsTo(GenInventory::class, 'inventory_id', 'commodityid');
+        return $this->belongsTo(GenInventory::class, 'inventory_id', 'gid');
     }
 
     public function report()

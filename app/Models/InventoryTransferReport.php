@@ -11,7 +11,7 @@ class InventoryTransferReport extends Model
 
     protected $table = 'inventory_transfer_reports';
 
-    protected $fillable = ['itr_no', 'entity_name', 'fund_cluster', 'from_entity', 'to_entity', 'date_issued', 'transfer_type_id', 'others_specify', 'reason', 'approved_by', 'issued_by', 'received_by', 'status', 'total_amount'];
+    protected $fillable = ['itr_no', 'itr_type', 'entity_name', 'fund_cluster', 'from_entity', 'to_entity', 'date_issued', 'transfer_type_id', 'others_specify', 'reason', 'approved_by', 'issued_by', 'received_by', 'status', 'total_amount'];
 
     public function items()
     {
