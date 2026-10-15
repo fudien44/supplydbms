@@ -143,7 +143,6 @@
 </div>
 
 <div class="subtitle">
-    As of
     {{ !empty($filters['as_of_date'])
         ? \Carbon\Carbon::parse($filters['as_of_date'])->format('F d, Y')
         : now()->format('F d, Y') }}
@@ -153,12 +152,7 @@
     <div class="meta-line">
         for which
         <strong>{{ $accountableOfficer['name'] ?? '' }}</strong>
-        @if(!empty($accountableOfficer['designation']))
-            , <strong>{{ $accountableOfficer['designation'] }}</strong>
-        @endif
-        @if(!empty($accountableOfficer['office']))
-            , <strong>{{ $accountableOfficer['office'] }}</strong>
-        @endif
+        of <strong>DOH - CHD SOCCSKSARGEN Region</strong>
         is accountable after having to assume such accountability
         <span style="display:inline-block; border-bottom:1px solid #000; min-width:90px;">&nbsp;</span>.
     </div>
@@ -229,7 +223,7 @@
                         <td class="text-center">
                             {{ !empty($item->date_acquired) ? \Carbon\Carbon::parse($item->date_acquired)->format('m/d/Y') : '' }}
                         </td>
-                        <td class="text-center">{{ $item->stock_no }}</td>
+                        <td class="text-center">{{ $item->po_no }}</td>
                         <td class="text-center">{{ $item->unitofmeasure }}</td>
                         <td class="text-right">{{ number_format((float)$item->u_cost, 2) }}</td>
                         <td class="text-center">{{ number_format((float)$item->qty, 0) }}</td>
@@ -237,7 +231,7 @@
                         <td class="text-right">{{ number_format((float)$item->amt, 2) }}</td>
                         <td></td>
                         <td></td>
-                        <td>{{ $item->remarks ?? '' }}</td>
+                        <td class="remarks">{{ $item->remarks ?? '' }}</td>
                     </tr>
                 @endforeach
 
@@ -257,7 +251,7 @@
                     <td class="text-center">
                         {{ !empty($item->date_acquired) ? \Carbon\Carbon::parse($item->date_acquired)->format('m/d/Y') : '' }}
                     </td>
-                    <td class="text-center">{{ $item->stock_no }}</td>
+                    <td class="text-center">{{ $item->po_no }}</td>
                     <td class="text-center">{{ $item->unitofmeasure }}</td>
                     <td class="text-right">{{ number_format((float)$item->u_cost, 2) }}</td>
                     <td class="text-center">{{ number_format((float)$item->qty, 0) }}</td>
@@ -265,7 +259,7 @@
                     <td class="text-right">{{ number_format((float)$item->amt, 2) }}</td>
                     <td></td>
                     <td></td>
-                    <td>{{ $item->remarks ?? '' }}</td>
+                    <td class="remarks">{{ $item->remarks ?? '' }}</td>
                 </tr>
             @empty
                 <tr>
@@ -313,7 +307,7 @@
                 @else
                     <div style="margin-bottom:10px;">&nbsp;</div>
                 @endif
-                <div style="border-top:1px solid #000; margin:0 6px; padding-top:2px;">
+                <div style="border-top:1px solid #000; margin:0 28px; padding-top:2px;">
                     <div style="font-size:8px;">Signature over Printed Name of {{ $block['role'] }}</div>
                 </div>
             </td>
