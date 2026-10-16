@@ -25,7 +25,7 @@
     <tr><td colspan="12" style="text-align:center;font-weight:bold;">{{ $subtitle }}</td></tr>
     <tr><td colspan="12" style="text-align:center;">{{ $asOf }}</td></tr>
     @if(!empty($accountablePersonName))
-        <tr><td colspan="12">for which {{ $accountablePersonName }} of DOH - CHD SOCCSKSARGEN Region is accountable after having to assume such accountability.</td></tr>
+        <tr><td colspan="12">for which {{ $accountablePersonName }} of DOH - CHD SOCCSKSARGEN Region is accountable after having to assume such accountability on {{ !empty($dateAssumed) ? \Carbon\Carbon::parse($dateAssumed)->format('F d, Y') : '' }}.</td></tr>
     @endif
     <tr><td colspan="12"></td></tr>
 
@@ -41,7 +41,7 @@
         <th style="{{ $hdr }}">TOTAL VALUE</th>
         <th style="{{ $hdr }}">SHORTAGE / OVERAGE QTY</th>
         <th style="{{ $hdr }}">SHORTAGE / OVERAGE VALUE</th>
-        <th style="{{ $hdr }}">REMARKS</th>
+        <th style="{{ $hdr }}">REMARKS (CONDITION/LOCATION)</th>
     </tr>
 
     @if($shouldGroupByOfficer)

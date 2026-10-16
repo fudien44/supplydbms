@@ -153,8 +153,12 @@
         for which
         <strong>{{ $accountableOfficer['name'] ?? '' }}</strong>
         of <strong>DOH - CHD SOCCSKSARGEN Region</strong>
-        is accountable after having to assume such accountability
-        <span style="display:inline-block; border-bottom:1px solid #000; min-width:90px;">&nbsp;</span>.
+        is accountable after having to assume such accountability on
+        @if(!empty($filters['date_assumed']))
+            {{ \Carbon\Carbon::parse($filters['date_assumed'])->format('F d, Y') }}.
+        @else
+            <span style="display:inline-block; border-bottom:1px solid #000; min-width:90px;">&nbsp;</span>.
+        @endif
     </div>
 @endif
 
@@ -189,7 +193,7 @@
 
             <th rowspan="2" class="total">TOTAL VALUE</th>
             <th colspan="2">SHORTAGE / OVERAGE</th>
-            <th rowspan="2" class="remarks">REMARKS</th>
+            <th rowspan="2" class="remarks">REMARKS<br><span class="small-text">(CONDITION/LOCATION)</span></th>
         </tr>
         <tr>
             <th class="shortqty">QTY</th>
