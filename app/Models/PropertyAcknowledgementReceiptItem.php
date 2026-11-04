@@ -19,6 +19,7 @@ class PropertyAcknowledgementReceiptItem extends Model
         'description',
         'reference',
         'property_no',
+        'seqno',
     ];
 
     public function receipt()

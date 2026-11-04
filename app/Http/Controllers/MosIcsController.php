@@ -6,12 +6,11 @@ use App\Exports\IcsExcelExport;
 use App\Models\EmployeeList;
 use App\Models\InventoryCustodianSlip;
 use App\Models\Signatory;
+use App\Support\MedicalLedger;
 use Barryvdh\DomPDF\Facade\Pdf;
-use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Validation\Rule;
 use Maatwebsite\Excel\Facades\Excel;
 
 class MosIcsController extends Controller
@@ -32,13 +31,10 @@ class MosIcsController extends Controller
             ->where('comcategid', self::MEDICAL_CATEGORY_ID);
     }
 
-    // Same pattern as the C# app: ICS{yyyy}-{MM}({dd})-{next id}
+    // CHD12-ICS-YYYY-MM-xxxx (resets monthly; shared by medical and office ICS)
     private function nextIcsNo(?string $date = null): string
     {
-        $d = $date ? Carbon::parse($date) : now();
-        $seq = ((int) InventoryCustodianSlip::max('id')) + 1;
-
-        return sprintf('ICS%s-%s(%s)-%04d', $d->format('Y'), $d->format('m'), $d->format('d'), $seq);
+        return MedicalLedger::nextDocNo('inventory_custodian_slips', 'ics_no', 'ICS', $date);
     }
 
     // Dropdown data for the modal
@@ -51,6 +47,7 @@ class MosIcsController extends Controller
                 ->orderBy('firstname')
                 ->get(),
             'nextIcsNo'     => $this->nextIcsNo(),
+            'programs'      => MedicalLedger::programs(), // Fund Cluster dropdown
             'defaultEntity' => self::DEFAULT_ENTITY,
         ]);
     }
@@ -70,12 +67,13 @@ class MosIcsController extends Controller
                 ->select(
                     'gid as id', 'stockno', 'dateaquired', 'poptrno', 'reference',
                     'itemdesc', 'com_desc as description', 'uom_name as unit',
-                    'categ_name', 'unitcost', 'balance'
+                    'categ_name', 'unitcost', 'balance_checkall as balance'
                 )
                 ->where('void', 0)
                 ->whereNotNull('commodityid')
                 ->whereIn('typeofcomid', $this->medicalCategoryCodes())
                 ->where('unitcost', '<=', self::ICS_MAX_UNIT_COST)
+                ->where('balance_checkall', '>', 0) // only lots with stock left
                 ->orderByDesc('dateaquired')
                 ->orderByDesc('gid');
 
@@ -236,10 +234,9 @@ class MosIcsController extends Controller
         $icsType = $this->icsType($request);
 
         $data = $request->validate([
-            'ics_no'                  => ['required', 'string', 'max:50',
-                Rule::unique('inventory_custodian_slips', 'ics_no')->ignore($id)],
+            'ics_no'                  => 'required|string|max:50',
             'entity_name'             => 'required|string|max:255',
-            'fund_cluster'            => 'required|string|max:100',
+            'fund_cluster'            => 'required|string|max:255',
             'date_issued'             => 'required|date',
             'issued_by'               => 'required|integer',
             'received_by'             => 'required|integer',
@@ -256,7 +253,6 @@ class MosIcsController extends Controller
             'items.*.inventory_no'    => 'nullable|string|max:100',
             'items.*.est_useful_life' => 'nullable|string|max:50',
         ], [
-            'ics_no.unique'         => 'ICS No. already exists.',
             'items.required'        => 'Add at least one item.',
             'items.*.unit_cost.max' => 'ICS items must cost ₱50,000 or less. Use PAR for higher-value items.',
         ]);
@@ -269,6 +265,19 @@ class MosIcsController extends Controller
                     'message' => 'This ICS belongs to the other module.',
                 ], 422);
             }
+        }
+
+        // ICS No. is editable but must be unique; suggest the next free number when taken
+        $duplicate = InventoryCustodianSlip::where('ics_no', $data['ics_no'])
+            ->when($id, fn ($q) => $q->where('id', '!=', $id))
+            ->exists();
+
+        if ($duplicate) {
+            return response()->json([
+                'success'   => false,
+                'message'   => "ICS No. '{$data['ics_no']}' already exists.",
+                'suggested' => $this->nextIcsNo($data['date_issued']),
+            ], 422);
         }
 
         // Medical: picked items must be medical equipment ≤ ₱50,000; manual rows allowed
@@ -308,19 +317,36 @@ class MosIcsController extends Controller
         $header = collect($data)->except('items')->all();
         $header['total_amount'] = $items->sum('amount');
 
-        $slip = DB::transaction(function () use ($id, $header, $items, $icsType) {
-            if ($id) {
-                $slip = InventoryCustodianSlip::findOrFail($id);
-                $slip->update($header);
-                $slip->items()->delete();
-            } else {
-                $slip = InventoryCustodianSlip::create($header + ['ics_type' => $icsType]);
-            }
+        // Medical: saving deducts stock through the ledger views (edit re-checks, delete returns it)
+        try {
+            $slip = DB::transaction(function () use ($id, $header, $items, $icsType) {
+                if ($id) {
+                    $slip = InventoryCustodianSlip::findOrFail($id);
+                    $slip->update($header);
+                    $slip->items()->delete(); // old quantities go back to the balance
+                } else {
+                    $slip = InventoryCustodianSlip::create($header + ['ics_type' => $icsType]);
+                }
 
-            $slip->items()->createMany($items->all());
+                $medical = $icsType === 'medical';
 
-            return $slip;
-        });
+                if ($medical && $error = MedicalLedger::stockError($items)) {
+                    throw new \RuntimeException($error);
+                }
+
+                // One by one so each picked medical row gets the next ledger seqno for its lot
+                foreach ($items as $item) {
+                    $item['seqno'] = $medical && $item['inventory_id']
+                        ? MedicalLedger::nextSeqno((int) $item['inventory_id'])
+                        : null;
+                    $slip->items()->create($item);
+                }
+
+                return $slip;
+            });
+        } catch (\RuntimeException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 422);
+        }
 
         return response()->json([
             'success' => true,

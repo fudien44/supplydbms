@@ -6,15 +6,14 @@ use App\Exports\ParExcelExport;
 use App\Models\EmployeeList;
 use App\Models\PropertyAcknowledgementReceipt;
 use App\Models\Signatory;
+use App\Support\MedicalLedger;
 use Barryvdh\DomPDF\Facade\Pdf;
-use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Validation\Rule;
 use Maatwebsite\Excel\Facades\Excel;
 
-// Medical equipment PAR (record-only: no stock check or deduction)
+// Medical equipment PAR: saving deducts stock (same ledger as PTR/RIS/ITR/ICS)
 class MosParController extends Controller
 {
     private const MEDICAL_CATEGORY_ID = 11;    // ref_commoditycategory.comcategid = Medical Equipment (10605110)
@@ -28,13 +27,10 @@ class MosParController extends Controller
             ->where('comcategid', self::MEDICAL_CATEGORY_ID);
     }
 
-    // Same pattern as the C# app: PAR{yyyy}-{MM}({dd})-{next id}
+    // CHD12-PAR-YYYY-MM-xxxx (resets monthly)
     private function nextParNo(?string $date = null): string
     {
-        $d = $date ? Carbon::parse($date) : now();
-        $seq = ((int) PropertyAcknowledgementReceipt::max('id')) + 1;
-
-        return sprintf('PAR%s-%s(%s)-%04d', $d->format('Y'), $d->format('m'), $d->format('d'), $seq);
+        return MedicalLedger::nextDocNo('property_acknowledgement_receipts', 'par_no', 'PAR', $date);
     }
 
     // Dropdown data for the modal
@@ -47,6 +43,7 @@ class MosParController extends Controller
                 ->orderBy('firstname')
                 ->get(),
             'nextParNo'     => $this->nextParNo(),
+            'programs'      => MedicalLedger::programs(), // Fund Cluster dropdown
             'defaultEntity' => self::DEFAULT_ENTITY,
         ]);
     }
@@ -65,12 +62,13 @@ class MosParController extends Controller
             ->select(
                 'gid as id', 'stockno', 'dateaquired', 'poptrno', 'reference',
                 'itemdesc', 'com_desc as description', 'uom_name as unit',
-                'categ_name', 'unitcost', 'balance'
+                'categ_name', 'unitcost', 'balance_checkall as balance'
             )
             ->where('void', 0)
             ->whereNotNull('commodityid')
             ->whereIn('typeofcomid', $this->medicalCategoryCodes())
             ->where('unitcost', '>=', self::PAR_MIN_UNIT_COST)
+            ->where('balance_checkall', '>', 0) // only lots with stock left
             ->orderByDesc('dateaquired')
             ->orderByDesc('gid');
 
@@ -152,10 +150,9 @@ class MosParController extends Controller
         $id = $request->input('id') ? (int) $request->input('id') : null;
 
         $data = $request->validate([
-            'par_no'                => ['required', 'string', 'max:50',
-                Rule::unique('property_acknowledgement_receipts', 'par_no')->ignore($id)],
+            'par_no'                => 'required|string|max:50',
             'entity_name'           => 'required|string|max:255',
-            'fund_cluster'          => 'required|string|max:100',
+            'fund_cluster'          => 'required|string|max:255',
             'date_issued'           => 'required|date',
             'issued_by'             => 'required|integer',
             'received_by'           => 'required|integer',
@@ -171,10 +168,22 @@ class MosParController extends Controller
             'items.*.reference'     => 'nullable|string|max:255',
             'items.*.property_no'   => 'nullable|string|max:100',
         ], [
-            'par_no.unique'         => 'PAR No. already exists.',
             'items.required'        => 'Add at least one item.',
             'items.*.unit_cost.min' => 'PAR items must cost ₱50,000 or more. Use ICS for lower-value items.',
         ]);
+
+        // PAR No. is editable but must be unique; suggest the next free number when taken
+        $duplicate = PropertyAcknowledgementReceipt::where('par_no', $data['par_no'])
+            ->when($id, fn ($q) => $q->where('id', '!=', $id))
+            ->exists();
+
+        if ($duplicate) {
+            return response()->json([
+                'success'   => false,
+                'message'   => "PAR No. '{$data['par_no']}' already exists.",
+                'suggested' => $this->nextParNo($data['date_issued']),
+            ], 422);
+        }
 
         // Picked rows must be medical equipment lots (gid) at or above the PAR limit; manual rows are allowed
         $unique = collect($data['items'])->pluck('inventory_id')->filter()->unique()->values();
@@ -210,19 +219,34 @@ class MosParController extends Controller
         $header = collect($data)->except('items')->all();
         $header['total_amount'] = $items->sum('amount');
 
-        $par = DB::transaction(function () use ($id, $header, $items) {
-            if ($id) {
-                $par = PropertyAcknowledgementReceipt::findOrFail($id);
-                $par->update($header);
-                $par->items()->delete();
-            } else {
-                $par = PropertyAcknowledgementReceipt::create($header);
-            }
+        // Saving deducts stock through the ledger views (edit re-checks, delete returns it)
+        try {
+            $par = DB::transaction(function () use ($id, $header, $items) {
+                if ($id) {
+                    $par = PropertyAcknowledgementReceipt::findOrFail($id);
+                    $par->update($header);
+                    $par->items()->delete(); // old quantities go back to the balance
+                } else {
+                    $par = PropertyAcknowledgementReceipt::create($header);
+                }
 
-            $par->items()->createMany($items->all());
+                if ($error = MedicalLedger::stockError($items)) {
+                    throw new \RuntimeException($error);
+                }
 
-            return $par;
-        });
+                // One by one so each picked row gets the next ledger seqno for its lot
+                foreach ($items as $item) {
+                    $item['seqno'] = $item['inventory_id']
+                        ? MedicalLedger::nextSeqno((int) $item['inventory_id'])
+                        : null;
+                    $par->items()->create($item);
+                }
+
+                return $par;
+            });
+        } catch (\RuntimeException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 422);
+        }
 
         return response()->json([
             'success' => true,

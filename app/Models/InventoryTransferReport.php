@@ -13,6 +13,10 @@ class InventoryTransferReport extends Model
 
     protected $fillable = ['itr_no', 'itr_type', 'entity_name', 'fund_cluster', 'from_entity', 'to_entity', 'date_issued', 'transfer_type_id', 'others_specify', 'reason', 'approved_by', 'issued_by', 'received_by', 'status', 'total_amount'];
 
+         public function fromEntity() 
+         { 
+            return $this->belongsTo(SupUnit::class, 'from_entity', 'id'); 
+            }
     public function items()
     {
         return $this->hasMany(InventoryTransferReportItem::class, 'transfer_report_id', 'id');
@@ -26,11 +30,6 @@ class InventoryTransferReport extends Model
     public function toEntity()
     {
         return $this->belongsTo(FacilityAgencyList::class, 'to_entity', 'faid');
-    }
-
-    public function fromEntity()
-    {
-        return $this->belongsTo(FacilityAgencyList::class, 'from_entity', 'faid');
     }
 
     public function employeeInfo()

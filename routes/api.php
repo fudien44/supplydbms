@@ -53,6 +53,7 @@ Route::group(['prefix' => 'itr'], function () {
     Route::post('/save', [MosItrController::class, 'save']);
     Route::get('/list', [MosItrController::class, 'listItr']);
     Route::get('/export', [MosItrController::class, 'export']);
+    Route::get('/next-no', [MosItrController::class, 'nextNo']);
     Route::get('/{id}/pdf', [MosItrController::class, 'generatePdf']);
     Route::get('/{id}/attachments', [MosItrController::class, 'listAttachments']); // ← ADD
     Route::post('/{id}/upload-attachment', [MosItrController::class, 'uploadAttachment']);
