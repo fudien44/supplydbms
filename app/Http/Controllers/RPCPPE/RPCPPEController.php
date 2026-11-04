@@ -1463,6 +1463,7 @@ class RPCPPEController extends Controller
             'accountable_person' => 'required|string',
             'form_type' => 'nullable|string',
             'as_of_date' => 'nullable|date',
+            'date_assumed' => 'required|date',
             'export_format' => 'nullable|in:pdf,excel',
             'ids' => 'nullable|array',
             'ids.*' => 'integer',
@@ -1744,6 +1745,7 @@ class RPCPPEController extends Controller
                     'accountable_person' => $validated['accountable_person'] ?? null,
                     'form_type' => $validated['form_type'] ?? null,
                     'as_of_date' => $validated['as_of_date'] ?? null,
+                    'date_assumed' => $validated['date_assumed'] ?? null,
                     'ppe_name' => $this->resolvePpeName(
                         $items,
                         isset($validated['property_type_id']) ? (int) $validated['property_type_id'] : null
@@ -1799,6 +1801,7 @@ class RPCPPEController extends Controller
                     'accountable_person' => $validated['accountable_person'] ?? null,
                     'form_type' => $validated['form_type'] ?? null,
                     'as_of_date' => $validated['as_of_date'] ?? null,
+                    'date_assumed' => $validated['date_assumed'] ?? null,
                     'ppe_name' => $this->resolvePpeName(
                         $items,
                         isset($validated['property_type_id']) ? (int) $validated['property_type_id'] : null
@@ -1846,6 +1849,7 @@ class RPCPPEController extends Controller
                     ? \Carbon\Carbon::parse($request->input('as_of_date'))->format('F d, Y')
                     : now()->format('F d, Y'),
                 'accountablePersonName' => $accountablePerson['name'] ?? '',
+                'dateAssumed'           => $request->input('date_assumed'),
                 'shouldGroupByOfficer'  => $shouldGroupByOfficer,
                 'groupedItems'          => $groupedItems,
                 'items'                 => $items,
