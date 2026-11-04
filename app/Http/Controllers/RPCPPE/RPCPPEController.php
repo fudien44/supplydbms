@@ -50,19 +50,25 @@ class RPCPPEController extends Controller
             $page     = max(1, (int) $request->input('page', 1));
             $offset   = ($page - 1) * $perPage;
 
-            $like = '%' . $search . '%';
+            // Split the query into keywords. Cross-field keyword search: EVERY
+            // keyword must appear in SOME field (description, stock no., P.O.,
+            // source, remarks), in any order — "Gestetner Toner" or even
+            // "2021 Gestetner" (stock no. + description) both match.
+            $terms = preg_split('/\s+/', trim($search), -1, PREG_SPLIT_NO_EMPTY) ?: [];
 
-            // Resolve description matches on the small commodity tables up front
-            // (avoids an OR predicate spanning a join on the large text column).
-            $w2Com = [];
-            $w1Com = [];
-            if ($search !== '') {
-                $w2Com = $conn->table('dbo.tbl_mrcommodity')
-                    ->where('com_desc', 'like', $like)->pluck('OS_code')
-                    ->map(fn ($v) => (int) $v)->filter()->values()->all();
-                $w1Com = $conn->table('dbo.ref_commoditymasterlist')
-                    ->where('com_desc', 'like', $like)->pluck('com_code')
-                    ->map(fn ($v) => (int) $v)->filter()->values()->all();
+            // For each keyword, resolve the commodities whose description contains
+            // it (done up front on the small commodity tables to keep the text
+            // column out of the join). Parallel arrays, one entry per term.
+            $w2ComByTerm = []; $w1ComByTerm = [];
+            if (!empty($terms)) {
+                foreach ($terms as $t) {
+                    $w2ComByTerm[] = $conn->table('dbo.tbl_mrcommodity')
+                        ->where('com_desc', 'like', '%' . $t . '%')->pluck('OS_code')
+                        ->map(fn ($v) => (int) $v)->filter()->values()->all();
+                    $w1ComByTerm[] = $conn->table('dbo.ref_commoditymasterlist')
+                        ->where('com_desc', 'like', '%' . $t . '%')->pluck('com_code')
+                        ->map(fn ($v) => (int) $v)->filter()->values()->all();
+                }
             }
 
             // The picker counts ONE classification at a time (keeps the list small):
@@ -82,7 +88,7 @@ class RPCPPEController extends Controller
             $w1Allowed = !empty($w1Cats) ? array_values(array_intersect($w1Cats, $base['W1'])) : $base['W1'];
 
             // World 2 (MR / office supplies / property) base query.
-            $buildW2 = function () use ($conn, $w2Allowed, $valueMin, $valueMax, $search, $like, $w2Com, $classification, $threshold) {
+            $buildW2 = function () use ($conn, $w2Allowed, $valueMin, $valueMax, $terms, $w2ComByTerm, $classification, $threshold) {
                 $q = $conn->table('dbo.tbl_mr_Maininventory as mi')
                     ->where(function ($v) { $v->whereNull('mi.void')->orWhere('mi.void', 0); });
                 $q->whereIn('mi.category_ID', $w2Allowed); // empty => no rows
@@ -90,18 +96,21 @@ class RPCPPEController extends Controller
                 elseif ($classification === 'semi') $q->where('mi.u_cost', '<', $threshold);
                 if ($valueMin !== null) $q->where('mi.u_cost', '>=', $valueMin);
                 if ($valueMax !== null) $q->where('mi.u_cost', '<=', $valueMax);
-                if ($search !== '') {
-                    $q->where(function ($s) use ($like, $w2Com) {
-                        $s->where('mi.stock_no', 'like', $like)->orWhere('mi.po_no', 'like', $like)
-                          ->orWhere('mi.source', 'like', $like)->orWhere('mi.remarks', 'like', $like);
-                        if (!empty($w2Com)) $s->orWhereIn('mi.commodity_ID', $w2Com);
+                // Each keyword must match some field (AND across keywords).
+                foreach ($terms as $i => $t) {
+                    $tLike = '%' . $t . '%';
+                    $comIds = $w2ComByTerm[$i] ?? [];
+                    $q->where(function ($s) use ($tLike, $comIds) {
+                        $s->where('mi.stock_no', 'like', $tLike)->orWhere('mi.po_no', 'like', $tLike)
+                          ->orWhere('mi.source', 'like', $tLike)->orWhere('mi.remarks', 'like', $tLike);
+                        if (!empty($comIds)) $s->orWhereIn('mi.commodity_ID', $comIds);
                     });
                 }
                 return $q;
             };
 
             // World 1 (consumables / general supply) base query.
-            $buildW1 = function () use ($conn, $w1Allowed, $valueMin, $valueMax, $search, $like, $w1Com, $classification, $threshold) {
+            $buildW1 = function () use ($conn, $w1Allowed, $valueMin, $valueMax, $terms, $w1ComByTerm, $classification, $threshold) {
                 $q = $conn->table('dbo.trans_gen_inventory as g')
                     ->where(function ($v) { $v->whereNull('g.void')->orWhere('g.void', 0); });
                 $q->whereIn('g.typeofcomid', $w1Allowed); // empty => no rows
@@ -109,11 +118,14 @@ class RPCPPEController extends Controller
                 elseif ($classification === 'semi') $q->where('g.unitcost', '<', $threshold);
                 if ($valueMin !== null) $q->where('g.unitcost', '>=', $valueMin);
                 if ($valueMax !== null) $q->where('g.unitcost', '<=', $valueMax);
-                if ($search !== '') {
-                    $q->where(function ($s) use ($like, $w1Com) {
-                        $s->where('g.stockno', 'like', $like)->orWhere('g.poptrno', 'like', $like)
-                          ->orWhere('g.source', 'like', $like);
-                        if (!empty($w1Com)) $s->orWhereIn('g.commodityid', $w1Com);
+                // Each keyword must match some field (AND across keywords).
+                foreach ($terms as $i => $t) {
+                    $tLike = '%' . $t . '%';
+                    $comIds = $w1ComByTerm[$i] ?? [];
+                    $q->where(function ($s) use ($tLike, $comIds) {
+                        $s->where('g.stockno', 'like', $tLike)->orWhere('g.poptrno', 'like', $tLike)
+                          ->orWhere('g.source', 'like', $tLike);
+                        if (!empty($comIds)) $s->orWhereIn('g.commodityid', $comIds);
                     });
                 }
                 return $q;
@@ -149,10 +161,10 @@ class RPCPPEController extends Controller
                 ->get();
 
             // Resolve com_desc for just this page, per world.
-            $w2ComIds = []; $w1ComIds = []; $w2Ids = [];
+            $w2ComIds = []; $w1ComIds = []; $w2Ids = []; $w1Ids = [];
             foreach ($pageRows as $r) {
                 if ($r->world === 'W2') { $w2ComIds[] = (int) $r->commodity_id; $w2Ids[] = (int) $r->item_id; }
-                else { $w1ComIds[] = (int) $r->commodity_id; }
+                else { $w1ComIds[] = (int) $r->commodity_id; $w1Ids[] = (int) $r->item_id; }
             }
 
             $w2Desc = [];
@@ -200,6 +212,9 @@ class RPCPPEController extends Controller
                 ", $w2Ids) as $r) { $parMap[(int) $r->inventory_ID] = $r; }
             }
 
+            // NOTE: the masterlist is a PICKER and shows the ORIGINAL qty (fast — no
+            // issuance scan). The true REMAINING balance is computed only where it
+            // matters and on few items: on Add (storeItems) and Refresh Balances.
             $data = collect($pageRows)->map(function ($r) use ($w2Desc, $w1Desc, $icsMap, $parMap) {
                 $r->com_desc     = $r->world === 'W2'
                     ? ($w2Desc[(int) $r->commodity_id] ?? '')
@@ -208,6 +223,7 @@ class RPCPPEController extends Controller
                 $r->category_ID  = $r->category_id;
                 $r->remarks      = '';
                 $r->source       = $r->world === 'W2' ? 'Office' : 'General';
+                $r->amt          = (float) $r->qty * (float) $r->u_cost;
 
                 $iss = $r->world === 'W2' ? ($icsMap[(int) $r->item_id] ?? $parMap[(int) $r->item_id] ?? null) : null;
                 $r->emp_no        = $iss->emp_no ?? '';
@@ -236,8 +252,9 @@ class RPCPPEController extends Controller
     {
         try {
             $search = trim((string) $request->input('search', ''));
+            $conn   = DB::connection('sqlsrv');
 
-            $query = DB::connection('sqlsrv')
+            $query = $conn
                 ->table('dbo.rpcppe as r')
                 ->leftJoin('dbo.articles as a', 'a.id', '=', 'r.article_id')
                 ->select(
@@ -283,17 +300,45 @@ class RPCPPEController extends Controller
                 ->orderBy('r.ID', 'desc')
                 ->get();
 
+            // Resolve the ORIGINAL received quantity from the live source inventory
+            // (not stored on rpcppe): World 2 → tbl_mr_Maininventory.qty,
+            // World 1 → trans_gen_inventory.origqty. Keyed by item_id per world.
+            $w2Ids = []; $w1Ids = [];
+            foreach ($data as $r) {
+                $itemId = (int) $r->item_id;
+                if ($itemId <= 0) continue;
+                if (($r->source_world ?: 'W2') === 'W1') $w1Ids[] = $itemId;
+                else $w2Ids[] = $itemId;
+            }
+            $w2Orig = []; $w1Orig = [];
+            if (!empty($w2Ids)) {
+                foreach ($conn->table('dbo.tbl_mr_Maininventory')->whereIn('ID', array_unique($w2Ids))
+                    ->get(['ID', 'qty']) as $x) { $w2Orig[(int) $x->ID] = (float) $x->qty; }
+            }
+            if (!empty($w1Ids)) {
+                foreach ($conn->table('dbo.trans_gen_inventory')->whereIn('gid', array_unique($w1Ids))
+                    ->get(['gid', 'origqty']) as $x) { $w1Orig[(int) $x->gid] = (float) $x->origqty; }
+            }
+
             // Tag each row with its nature: RPCI (inventory/consumable) vs PROPERTY
             // (PPE/Semi, split later by threshold). Lets the dashboard count RPCI
             // separately instead of lumping consumables into Semi-Expendable.
             $rpci = $this->rpciCategoryCodes();
-            $data->transform(function ($r) use ($rpci) {
+            $data->transform(function ($r) use ($rpci, $w2Orig, $w1Orig) {
                 $world = $r->source_world ?: 'W2';
                 $code  = (int) $r->category_id;
                 $r->report_type = in_array($code, $rpci[$world] ?? [], true) ? 'RPCI' : 'PROPERTY';
 
+                $itemId = (int) $r->item_id;
+                $r->orig_qty = $world === 'W1'
+                    ? ($w1Orig[$itemId] ?? null)
+                    : ($w2Orig[$itemId] ?? null);
+
                 return $r;
             });
+
+            // Balance per Card + Total Value are always shown live from source.
+            $data = $this->applyLiveBalances($data);
 
             return response()->json([
                 'status' => 'success',
@@ -350,6 +395,13 @@ class RPCPPEController extends Controller
                     continue;
                 }
 
+                // Compute the REAL remaining balance here (not in the masterlist) —
+                // only for the few items actually being added. Falls back to the
+                // posted qty if the source has no row.
+                $uCost = is_numeric($item['unitValue'] ?? null) ? (float) $item['unitValue'] : 0;
+                $qty   = $this->remainingBalance(DB::connection('sqlsrv'), $world, (int) $itemId)
+                         ?? (is_numeric($item['balancePerCard'] ?? null) ? (float) $item['balancePerCard'] : 0);
+
                 $rows[] = [
                     'item_id'        => $itemId,
                     'source_world'   => $world,
@@ -359,8 +411,8 @@ class RPCPPEController extends Controller
                     'unitofmeasure'  => $item['unit'] ?? null,
                     'po_no'          => $item['serialNo'] ?? null,
                     'date_acquired'  => !empty($item['dateAcquired']) ? $item['dateAcquired'] : null,
-                    'u_cost'         => is_numeric($item['unitValue'] ?? null) ? $item['unitValue'] : 0,
-                    'qty'            => is_numeric($item['balancePerCard'] ?? null) ? $item['balancePerCard'] : 0,
+                    'u_cost'         => $uCost,
+                    'qty'            => $qty,
                     'stock_no'       => $item['stockNo'] ?? null,
                     'source'         => $item['source'] ?? null,
                     'remarks'        => isset($item['remarks']) && $item['remarks'] !== '' ? $item['remarks'] : null,
@@ -369,7 +421,8 @@ class RPCPPEController extends Controller
                     'issuance_id'    => $item['issuance_id'] ?? 0,
                     'created_at'     => now(),
                     'updated_at'     => now(),
-                    'amt'            => is_numeric($item['totalValue'] ?? null) ? $item['totalValue'] : 0,
+                    // Total value = balance × unit cost (stays in sync as balance changes).
+                    'amt'            => $qty * $uCost,
                 ];
             }
 
@@ -523,7 +576,9 @@ class RPCPPEController extends Controller
                         'date_acquired' => !empty($item['dateAcquired']) ? $item['dateAcquired'] : null,
                         'u_cost'        => is_numeric($item['unitValue'] ?? null) ? $item['unitValue'] : 0,
                         'qty'           => is_numeric($item['balancePerCard'] ?? null) ? $item['balancePerCard'] : 0,
-                        'amt'           => is_numeric($item['totalValue'] ?? null) ? $item['totalValue'] : 0,
+                        // Derived from balance × unit cost, not pulled from masterlist.
+                        'amt'           => (is_numeric($item['balancePerCard'] ?? null) ? (float) $item['balancePerCard'] : 0)
+                                           * (is_numeric($item['unitValue'] ?? null) ? (float) $item['unitValue'] : 0),
                         'stock_no'      => $item['stockNo'] ?? null,
                         'source'        => $item['source'] ?? null,
                         'remarks'       => isset($item['remarks']) && $item['remarks'] !== '' ? $item['remarks'] : null,
@@ -548,6 +603,125 @@ class RPCPPEController extends Controller
                 'message' => $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * The REMAINING balance for one source item, netting all issuance channels.
+     *   World 1 → latest running balance (vw_gen_runningbalance), else origqty
+     *   World 2 → received qty − ICS − PAR − RIS − PTR + returns  (base tables,
+     *             not the slow vw_mrissuedlist view)
+     * Returns null when the item has no source row (e.g. manual entries).
+     */
+    private function remainingBalance($conn, string $world, int $itemId): ?float
+    {
+        if ($itemId <= 0) return null;
+
+        if ($world === 'W1') {
+            $bal = $conn->table('dbo.vw_gen_runningbalance')
+                ->where('stockid', $itemId)->orderByDesc('seqno')->value('balance');
+            if ($bal === null) {
+                $bal = $conn->table('dbo.trans_gen_inventory')->where('gid', $itemId)->value('origqty');
+            }
+            return $bal === null ? null : (float) $bal;
+        }
+
+        $orig = $conn->table('dbo.tbl_mr_Maininventory')->where('ID', $itemId)->value('qty');
+        if ($orig === null) return null;
+
+        $voidOk = function ($q) { $q->where(function ($v) { $v->whereNull('void')->orWhere('void', 0); }); };
+        $sum = function ($table, $col, $extra = null) use ($conn, $itemId, $voidOk) {
+            $q = $conn->table('dbo.' . $table)->where('inventory_ID', $itemId);
+            $voidOk($q);
+            if ($extra) $extra($q);
+            return (float) $q->sum(DB::raw("ABS($col)"));
+        };
+
+        $ics = $sum('tbl_mricslist', 'qty');
+        $par = $sum('tbl_mrparlist', 'qty');
+        $ris = $sum('tbl_mrrislist', 'qty_issued', fn ($q) => $q->where('issued_stat', '>', 0));
+        $ptr = $sum('tbl_mr_inventoryptrlist', 'qty', fn ($q) => $q->where('status', '>', 0));
+        $rtn = (float) $conn->table('dbo.tbl_mr_returnlist')->where('inventory_ID', $itemId)
+            ->where(function ($v) { $v->whereNull('void')->orWhere('void', 0); })->sum('qty');
+
+        return (float) $orig - $ics - $par - $ris - $ptr + $rtn;
+    }
+
+    /**
+     * Recompute each report row's Balance per Card and Total Value LIVE from the
+     * source inventory — batched (a handful of grouped queries regardless of row
+     * count) so generated reports are accurate even if the stored rpcppe snapshot
+     * is stale, with no manual Refresh Balances needed first. Manual entries
+     * (item_id 0) keep their stored values.
+     */
+    private function applyLiveBalances($items)
+    {
+        $conn = DB::connection('sqlsrv');
+
+        $w2 = []; $w1 = [];
+        foreach ($items as $it) {
+            $id = (int) ($it->item_id ?? 0);
+            if ($id <= 0) continue;
+            if (($it->source_world ?: 'W2') === 'W1') $w1[] = $id; else $w2[] = $id;
+        }
+        $w2 = array_values(array_unique($w2));
+        $w1 = array_values(array_unique($w1));
+
+        $bal = []; // keyed "W2:<id>" / "W1:<id>"
+
+        if (!empty($w2)) {
+            $orig = [];
+            foreach ($conn->table('dbo.tbl_mr_Maininventory')->whereIn('ID', $w2)->get(['ID', 'qty']) as $x) {
+                $orig[(int) $x->ID] = (float) $x->qty;
+            }
+            $net = [];
+            $add = function ($table, $col, $sign, $extra = null) use ($conn, $w2, &$net) {
+                $q = $conn->table('dbo.' . $table)->whereIn('inventory_ID', $w2)
+                    ->where(function ($v) { $v->whereNull('void')->orWhere('void', 0); });
+                if ($extra) $extra($q);
+                foreach ($q->selectRaw("inventory_ID, SUM(ABS($col)) AS q")->groupBy('inventory_ID')->get() as $r) {
+                    $net[(int) $r->inventory_ID] = ($net[(int) $r->inventory_ID] ?? 0) + $sign * (float) $r->q;
+                }
+            };
+            $add('tbl_mricslist', 'qty', -1);
+            $add('tbl_mrparlist', 'qty', -1);
+            $add('tbl_mrrislist', 'qty_issued', -1, fn ($q) => $q->where('issued_stat', '>', 0));
+            $add('tbl_mr_inventoryptrlist', 'qty', -1, fn ($q) => $q->where('status', '>', 0));
+            $add('tbl_mr_returnlist', 'qty', 1);
+            foreach ($w2 as $id) {
+                if (isset($orig[$id])) $bal['W2:' . $id] = $orig[$id] + ($net[$id] ?? 0);
+            }
+        }
+
+        if (!empty($w1)) {
+            $ph = implode(',', array_fill(0, count($w1), '?'));
+            $rb = [];
+            foreach ($conn->select("
+                SELECT stockid, balance FROM (
+                    SELECT stockid, balance, ROW_NUMBER() OVER (PARTITION BY stockid ORDER BY seqno DESC) AS rn
+                    FROM dbo.vw_gen_runningbalance WHERE stockid IN ($ph)
+                ) x WHERE x.rn = 1
+            ", $w1) as $r) { $rb[(int) $r->stockid] = (float) $r->balance; }
+            $o1 = [];
+            foreach ($conn->table('dbo.trans_gen_inventory')->whereIn('gid', $w1)->get(['gid', 'origqty']) as $x) {
+                $o1[(int) $x->gid] = (float) $x->origqty;
+            }
+            foreach ($w1 as $id) {
+                $b = $rb[$id] ?? ($o1[$id] ?? null);
+                if ($b !== null) $bal['W1:' . $id] = $b;
+            }
+        }
+
+        foreach ($items as $it) {
+            $id = (int) ($it->item_id ?? 0);
+            if ($id <= 0) continue; // manual entry — keep stored values
+            $key = ($it->source_world ?: 'W2') . ':' . $id;
+            if (isset($bal[$key])) {
+                $it->qty = $bal[$key];
+                $it->amt = $bal[$key] * (float) $it->u_cost;
+            }
+        }
+
+        return $items;
     }
 
     /**
@@ -586,9 +760,9 @@ class RPCPPEController extends Controller
     }
 
     /**
-     * Re-pull the current stock balance from the live source inventory for the
+     * Re-pull the current REMAINING balance from the live source inventory for the
      * given rpcppe rows (Balance per Card goes stale as stock moves):
-     *   World 2 → tbl_mr_Maininventory.qty
+     *   World 2 → tbl_mr_Maininventory.qty − issued(ICS+PAR) + returns
      *   World 1 → latest running balance (vw_gen_runningbalance), else origqty
      * The amount is recomputed as qty × unit cost. Manual rows (item_id 0) skip.
      */
@@ -604,7 +778,7 @@ class RPCPPEController extends Controller
 
             $rows = $conn->table('dbo.rpcppe')
                 ->whereIn('ID', $validated['ids'])
-                ->get(['ID', 'item_id', 'source_world', 'u_cost', 'qty']);
+                ->get(['ID', 'item_id', 'source_world', 'u_cost', 'qty', 'amt']);
 
             $updated   = [];
             $unchanged = 0;
@@ -614,37 +788,18 @@ class RPCPPEController extends Controller
                 if ($itemId <= 0) continue; // manual entry — no source to refresh from
 
                 $world = $r->source_world ?: 'W2';
-                $qty   = null;
-
-                if ($world === 'W1') {
-                    $qty = $conn->table('dbo.vw_gen_runningbalance')
-                        ->where('stockid', $itemId)
-                        ->orderByDesc('seqno')
-                        ->value('balance');
-
-                    if ($qty === null) {
-                        $qty = $conn->table('dbo.trans_gen_inventory')
-                            ->where('gid', $itemId)
-                            ->value('origqty');
-                    }
-                } else {
-                    $qty = $conn->table('dbo.tbl_mr_Maininventory')
-                        ->where('ID', $itemId)
-                        ->value('qty');
-                }
+                $qty   = $this->remainingBalance($conn, $world, $itemId);
 
                 if ($qty === null) continue; // source row gone — leave as-is
 
-                $qty = (float) $qty;
+                $amt = $qty * (float) $r->u_cost;
 
-                // Only touch the row if the masterlist balance actually changed;
-                // otherwise leave the physical-count item exactly as it is.
-                if (abs($qty - (float) $r->qty) < 0.0001) {
+                // Skip only when BOTH balance and total value already match — so a
+                // stale total value gets corrected even if the balance didn't change.
+                if (abs($qty - (float) $r->qty) < 0.0001 && abs($amt - (float) $r->amt) < 0.0001) {
                     $unchanged++;
                     continue;
                 }
-
-                $amt = $qty * (float) $r->u_cost;
 
                 $conn->table('dbo.rpcppe')
                     ->where('ID', $r->ID)
@@ -1346,6 +1501,7 @@ class RPCPPEController extends Controller
             ->select(
                 'r.ID',
                 'r.item_id',
+                'r.source_world',
                 'r.article_id',
                 'r.category_id',
                 'r.com_desc',
@@ -1556,7 +1712,7 @@ class RPCPPEController extends Controller
         try {
             $validated = $this->validateReportRequest($request);
 
-            $items = $this->buildReportQuery($request)->get();
+            $items = $this->applyLiveBalances($this->buildReportQuery($request)->get());
 
             $total = $items->sum(function ($item) {
                 return (float) $item->amt;
@@ -1611,7 +1767,7 @@ class RPCPPEController extends Controller
         try {
             $validated = $this->validateReportRequest($request);
 
-            $items = $this->buildReportQuery($request)->get();
+            $items = $this->applyLiveBalances($this->buildReportQuery($request)->get());
 
             $total = $items->sum(function ($item) {
                 return (float) $item->amt;
@@ -1666,75 +1822,40 @@ class RPCPPEController extends Controller
         try {
             $this->validateReportRequest($request);
 
-            $items = $this->buildReportQuery($request)->get();
-
+            $items = $this->applyLiveBalances($this->buildReportQuery($request)->get());
             $accountablePerson = $this->getAccountableOfficerDetails($request->input('accountable_person'));
-            $accountablePersonName = $accountablePerson['name'] ?? '';
+            $shouldGroupByOfficer = $accountablePerson === null;
+            $groupedItems = $shouldGroupByOfficer ? $this->groupItemsByAccountableOfficer($items) : [];
 
-            $filename = 'rpcppe-report-' . now()->format('Ymd-His') . '.csv';
+            $formType = $request->input('form_type');
+            $title = $formType === 'PPE'
+                ? 'REPORT ON THE PHYSICAL COUNT OF PROPERTY, PLANT AND EQUIPMENT (RPCPPE)'
+                : ($formType === 'RPCI'
+                    ? 'REPORT ON THE PHYSICAL COUNT OF INVENTORIES'
+                    : 'REPORT ON THE PHYSICAL COUNT OF SEMI-EXPENDABLE PROPERTY');
+            $ppeName = $this->resolvePpeName($items, $request->input('property_type_id') !== null ? (int) $request->input('property_type_id') : null);
 
-            $headers = [
-                'Content-Type' => 'text/csv; charset=UTF-8',
-                'Content-Disposition' => 'attachment; filename="' . $filename . '"',
+            $grandTotal = $shouldGroupByOfficer
+                ? array_sum(array_map(fn ($g) => (float) $g['total'], $groupedItems))
+                : (float) $items->sum(fn ($i) => (float) ($i->amt ?? 0));
+
+            $data = [
+                'title'    => $title,
+                'subtitle' => $ppeName ?: ($formType === 'RPCI' ? 'All Inventory Items' : 'All PPE Types'),
+                'asOf'     => !empty($request->input('as_of_date'))
+                    ? \Carbon\Carbon::parse($request->input('as_of_date'))->format('F d, Y')
+                    : now()->format('F d, Y'),
+                'accountablePersonName' => $accountablePerson['name'] ?? '',
+                'shouldGroupByOfficer'  => $shouldGroupByOfficer,
+                'groupedItems'          => $groupedItems,
+                'items'                 => $items,
+                'grandTotal'            => $grandTotal,
+                'signatories'           => $this->reportSignatories($request),
             ];
 
-            return response()->stream(function () use ($items, $request, $accountablePersonName) {
-                $handle = fopen('php://output', 'w');
+            $filename = 'rpcppe-report-' . now()->format('Ymd-His') . '.xlsx';
 
-                fprintf($handle, chr(0xEF) . chr(0xBB) . chr(0xBF));
-
-                $reportTitle = $request->input('form_type') === 'PPE'
-                    ? 'REPORT ON THE PHYSICAL COUNT OF PROPERTY, PLANT AND EQUIPMENT'
-                    : 'REPORT ON THE PHYSICAL COUNT OF SEMI-EXPENDABLE PROPERTY';
-
-                fputcsv($handle, [$reportTitle]);
-                fputcsv($handle, ['Form Type', $request->input('form_type', '')]);
-                fputcsv($handle, ['As of Date', $request->input('as_of_date', '')]);
-                fputcsv($handle, ['Accountable Person', $accountablePersonName]);
-                fputcsv($handle, []);
-
-                fputcsv($handle, [
-                    'ARTICLE',
-                    'DESCRIPTION',
-                    'DATE ACQUIRED',
-                    'SOURCE / SERIAL NO.',
-                    'UNIT OF MEASURE',
-                    'UNIT VALUE',
-                    'BALANCE PER CARD',
-                    'ON HAND PER COUNT',
-                    'TOTAL VALUE',
-                    'SHORTAGE / OVERAGE QTY',
-                    'SHORTAGE / OVERAGE VALUE',
-                    'REMARKS',
-                    'EMP NO',
-                    'ISSUANCE TYPE',
-                    'ISSUANCE ID',
-                    'PPE TYPE',
-                ]);
-
-                foreach ($items as $item) {
-                    fputcsv($handle, [
-                        $item->article_name,
-                        $item->com_desc,
-                        $item->date_acquired,
-                        $item->stock_no,
-                        $item->unitofmeasure,
-                        $item->u_cost,
-                        $item->qty,
-                        '',
-                        $item->amt,
-                        '',
-                        '',
-                        $item->remarks,
-                        $item->emp_no,
-                        $item->issuance_type,
-                        $item->issuance_id,
-                        $item->ppe_name,
-                    ]);
-                }
-
-                fclose($handle);
-            }, 200, $headers);
+            return \Maatwebsite\Excel\Facades\Excel::download(new \App\Exports\RpcppeReportExport($data), $filename);
         } catch (\Throwable $e) {
             return response()->json([
                 'status' => 'error',
