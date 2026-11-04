@@ -198,7 +198,7 @@
                     <td colspan="4" class="" style="text-align: left"><b>From</b> Accountable <br />
                         <span style="font-size: 10px;"> (Officer/Agency/Fund Cluster) </span>
                     </td>
-                    <td colspan="6" class="td4">{{ $transfer->fromEntity?->facilityname }}
+                    <td colspan="6" class="td4">{{ $transfer->fromEntity?->unitname }}
                     </td>
                     <td colspan="2" class="td1" style="text-align: right">ITR No.</td>
                     <td colspan="4" class="td4" style="text-align: center;">{{ $transfer->itr_no }}</td>

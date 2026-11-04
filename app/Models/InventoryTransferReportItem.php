@@ -13,6 +13,7 @@ class InventoryTransferReportItem extends Model
 
     protected $fillable = [
         'inventory_id',
+        'seqno',
         'transfer_report_id',
         'date_acquired',
         'reference',

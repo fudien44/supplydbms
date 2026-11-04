@@ -20,6 +20,7 @@ class InventoryCustodianSlipItem extends Model
         'reference',
         'inventory_no',
         'est_useful_life',
+        'seqno',
     ];
 
     public function slip()
